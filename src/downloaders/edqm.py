@@ -1,34 +1,34 @@
-"""EDQM CRS document downloader.
+"""EDQM public document downloader.
 
-Downloads COA (Certificate of Analysis), MSDS (Material Safety Data Sheet),
-and COO (Certificate of Origin) from https://crs.edqm.eu/.
+Downloads COA, MSDS and COO from https://crs.edqm.eu/ without login.
+COO output is normalized into a country-named `.txt` file.
 """
 
-import time
+from __future__ import annotations
+
+import html
 import logging
 import re
 import unicodedata
-from pathlib import Path
 from dataclasses import dataclass, field
+from pathlib import Path
+from urllib.parse import parse_qs, urljoin, urlparse
 
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
+import requests
 
-from src.config import EDQM_USERNAME, EDQM_PASSWORD, DOWNLOAD_DIR, HEADLESS
-from src.browser import create_browser
+from src.config import DOWNLOAD_DIR, EDQM_PASSWORD, EDQM_USERNAME, HEADLESS
 
 try:
     from pypdf import PdfReader
-except Exception:  # pragma: no cover - optional dependency import
+except Exception:  # pragma: no cover
     PdfReader = None
 
 logger = logging.getLogger(__name__)
 
 EDQM_BASE_URL = "https://crs.edqm.eu"
-EDQM_LOGIN_URL = f"{EDQM_BASE_URL}/db/4DCGI/Login"
-EDQM_SEARCH_URL = f"{EDQM_BASE_URL}/db/4DCGI/Search"
+EDQM_SEARCH_URL = f"{EDQM_BASE_URL}/db/4DCGI/search"
+
+REQUEST_TIMEOUT = 30
 
 
 @dataclass
@@ -41,12 +41,22 @@ class DownloadResult:
 
 
 @dataclass
+class ProductContext:
+    code: str
+    detail_url: str = ""
+    detail_html: str = ""
+    links: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class EDQMDownloader:
     username: str = field(default_factory=lambda: EDQM_USERNAME)
     password: str = field(default_factory=lambda: EDQM_PASSWORD)
     download_dir: Path = field(default_factory=lambda: DOWNLOAD_DIR)
     headless: bool = field(default_factory=lambda: HEADLESS)
-    _driver: object = field(default=None, repr=False)
+
+    _session: requests.Session | None = field(default=None, repr=False)
+    _current: ProductContext | None = field(default=None, repr=False)
 
     def __enter__(self):
         self.start()
@@ -56,209 +66,295 @@ class EDQMDownloader:
         self.stop()
 
     def start(self):
-        subdir = self.download_dir / "edqm"
-        subdir.mkdir(parents=True, exist_ok=True)
-        self._driver = create_browser(subdir, headless=self.headless)
-        logger.info("EDQM browser started")
+        (self.download_dir / "edqm").mkdir(parents=True, exist_ok=True)
+        session = requests.Session()
+        session.headers.update(
+            {
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/132.0.0.0 Safari/537.36"
+                ),
+                "Accept": "*/*",
+            }
+        )
+        self._session = session
+        logger.info("EDQM HTTP session started")
 
     def stop(self):
-        if self._driver:
-            self._driver.quit()
-            self._driver = None
-            logger.info("EDQM browser stopped")
+        if self._session:
+            self._session.close()
+            self._session = None
+            logger.info("EDQM HTTP session stopped")
 
     def login(self) -> bool:
-        """Log in to the EDQM CRS portal."""
-        if not self.username or not self.password:
-            logger.error("EDQM credentials not configured")
-            return False
-
-        try:
-            self._driver.get(EDQM_LOGIN_URL)
-            wait = WebDriverWait(self._driver, 15)
-
-            user_field = wait.until(
-                EC.presence_of_element_located((By.NAME, "vLogin"))
-            )
-            user_field.clear()
-            user_field.send_keys(self.username)
-
-            pass_field = self._driver.find_element(By.NAME, "vPassword")
-            pass_field.clear()
-            pass_field.send_keys(self.password)
-
-            submit = self._driver.find_element(By.CSS_SELECTOR, "input[type='submit']")
-            submit.click()
-
-            time.sleep(3)
-
-            if "Login" in self._driver.title:
-                logger.error("EDQM login failed - still on login page")
-                return False
-
-            logger.info("EDQM login successful")
-            return True
-
-        except (TimeoutException, NoSuchElementException) as e:
-            logger.error(f"EDQM login error: {e}")
-            return False
+        """EDQM catalogue/documents are public; no login needed."""
+        logger.info("EDQM login skipped (public access)")
+        return True
 
     def search_product(self, product_code: str) -> bool:
-        """Search for a product by its catalogue code."""
-        try:
-            self._driver.get(EDQM_SEARCH_URL)
-            wait = WebDriverWait(self._driver, 15)
-
-            search_field = wait.until(
-                EC.presence_of_element_located((By.NAME, "vSearchCriteria"))
-            )
-            search_field.clear()
-            search_field.send_keys(product_code)
-
-            submit = self._driver.find_element(By.CSS_SELECTOR, "input[type='submit']")
-            submit.click()
-
-            time.sleep(3)
-            logger.info(f"Searched for EDQM product: {product_code}")
-            return True
-
-        except (TimeoutException, NoSuchElementException) as e:
-            logger.error(f"EDQM search error for {product_code}: {e}")
+        """Search EDQM catalogue by exact catalogue code."""
+        session = self._require_session()
+        code = product_code.strip()
+        if not code:
+            self._current = None
             return False
 
-    def download_document(self, product_code: str, doc_type: str) -> DownloadResult:
-        """Download a specific document type for a product.
-
-        Args:
-            product_code: EDQM catalogue code (e.g., "Y0001532")
-            doc_type: One of "COA", "MSDS", "COO"
-        """
-        result = DownloadResult(product_code=product_code, doc_type=doc_type, success=False)
+        params = {
+            "vSelectName": "2",  # Catalogue Code
+            "vContains": "2",    # is exactly
+            "vtUserName": code,
+        }
 
         try:
-            link_texts = {
-                "COA": "Certificate of Analysis",
-                "MSDS": "Safety Data Sheet",
-                "COO": "Certificate of Origin",
-            }
-            link_text = link_texts.get(doc_type.upper())
-            if not link_text:
-                result.error = f"Unknown document type: {doc_type}"
-                return result
+            resp = session.get(EDQM_SEARCH_URL, params=params, timeout=REQUEST_TIMEOUT)
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            logger.error("EDQM search request failed for %s: %s", code, exc)
+            self._current = None
+            return False
 
-            wait = WebDriverWait(self._driver, 10)
-            link = wait.until(
-                EC.element_to_be_clickable((By.PARTIAL_LINK_TEXT, link_text))
-            )
+        detail_href = self._extract_detail_href(resp.text, code)
+        if not detail_href:
+            logger.warning("No EDQM result detail page for %s", code)
+            self._current = None
+            return False
 
-            dl_dir = self.download_dir / "edqm"
-            known_files = {f.name for f in dl_dir.iterdir() if f.is_file()}
-            start_time = time.time()
-            link.click()
+        detail_url = urljoin(EDQM_BASE_URL, detail_href)
+        detail_html = self._fetch_text(detail_url)
+        if not detail_html:
+            logger.warning("Failed to load EDQM detail page for %s", code)
+            self._current = None
+            return False
 
-            downloaded = self._wait_for_download(
-                product_code,
-                doc_type,
-                known_files=known_files,
-                started_at=start_time,
-            )
-            if downloaded:
-                if doc_type.upper() == "COO":
-                    downloaded = self._convert_coo_to_country_txt(downloaded, product_code)
-                result.success = True
-                result.file_path = str(downloaded)
-                logger.info(f"Downloaded {doc_type} for {product_code}: {downloaded}")
-            else:
-                result.error = "Download timed out"
-                logger.warning(f"Download timed out for {doc_type} of {product_code}")
+        links = self._extract_detail_links(detail_url, detail_html)
+        self._current = ProductContext(code=code, detail_url=detail_url, detail_html=detail_html, links=links)
+        logger.info("Resolved EDQM product %s -> %s", code, detail_url)
+        return True
 
-        except Exception as e:
-            result.error = str(e)
-            logger.error(f"Failed to download {doc_type} for {product_code}: {e}")
+    def download_document(self, product_code: str, doc_type: str) -> DownloadResult:
+        """Download one EDQM document type (COA, MSDS, COO)."""
+        result = DownloadResult(product_code=product_code, doc_type=doc_type.upper(), success=False)
+        doc_type = doc_type.upper()
 
-        return result
+        if not self._ensure_current_product(product_code):
+            result.error = "Product not found"
+            return result
+
+        assert self._current is not None
+
+        if doc_type not in {"COA", "MSDS", "COO"}:
+            result.error = f"Unknown document type: {doc_type}"
+            return result
+
+        doc_url = self._current.links.get(doc_type, "")
+        if not doc_url:
+            result.error = f"{doc_type} link not found"
+            return result
+
+        try:
+            if doc_type == "MSDS":
+                doc_url = self._resolve_edqm_sds_pdf(doc_url)
+
+            downloaded = self._download_binary(doc_url)
+            if doc_type == "COO":
+                downloaded = self._convert_coo_to_country_txt(downloaded, self._current.code)
+
+            result.success = True
+            result.file_path = str(downloaded)
+            logger.info("Downloaded EDQM %s for %s: %s", doc_type, self._current.code, downloaded)
+            return result
+
+        except Exception as exc:  # pragma: no cover
+            result.error = str(exc)
+            logger.error("Failed EDQM %s for %s: %s", doc_type, self._current.code, exc)
+            return result
 
     def download_all(self, product_code: str) -> list[DownloadResult]:
-        """Download COA, MSDS, and COO for a given product."""
-        results = []
+        """Download COA, MSDS and COO for an EDQM code."""
+        results: list[DownloadResult] = []
 
         if not self.search_product(product_code):
             for doc_type in ("COA", "MSDS", "COO"):
-                results.append(DownloadResult(
-                    product_code=product_code,
-                    doc_type=doc_type,
-                    success=False,
-                    error="Search failed",
-                ))
+                results.append(
+                    DownloadResult(
+                        product_code=product_code,
+                        doc_type=doc_type,
+                        success=False,
+                        error="Search failed",
+                    )
+                )
             return results
 
         for doc_type in ("COA", "MSDS", "COO"):
-            result = self.download_document(product_code, doc_type)
-            results.append(result)
-            self._driver.back()
-            time.sleep(1)
+            results.append(self.download_document(product_code, doc_type))
 
         return results
 
-    def _wait_for_download(
-        self,
-        product_code: str,
-        doc_type: str,
-        timeout: int = 30,
-        known_files: set[str] | None = None,
-        started_at: float | None = None,
-    ) -> Path | None:
-        """Wait for a file to finish downloading."""
-        dl_dir = self.download_dir / "edqm"
-        known_files = known_files or set()
-        started_at = started_at or time.time()
-        start = time.time()
-        while time.time() - start < timeout:
-            for f in dl_dir.iterdir():
-                if f.suffix == ".crdownload":
-                    continue
-                if not f.is_file():
-                    continue
-                is_new_file = f.name not in known_files
-                is_new_version = f.stat().st_mtime >= started_at - 1
-                if not (is_new_file or is_new_version):
-                    continue
-                if (
-                    product_code.lower() in f.name.lower()
-                    or doc_type.lower() in f.name.lower()
-                    or f.suffix.lower() in {".pdf", ".txt"}
-                ):
-                    return f
-            time.sleep(1)
-        return None
+    def _ensure_current_product(self, product_code: str) -> bool:
+        if not self._current:
+            return self.search_product(product_code)
+
+        if self._compact(self._current.code) == self._compact(product_code):
+            return True
+
+        return self.search_product(product_code)
+
+    def _extract_detail_href(self, html_text: str, product_code: str) -> str:
+        anchors = self._extract_anchors(html_text)
+        code_norm = self._compact(product_code)
+
+        for href, text in anchors:
+            if "/db/4dcgi/view=" in href.lower() and self._compact(text) == code_norm:
+                return href
+
+        for href, _text in anchors:
+            if "/db/4dcgi/view=" in href.lower():
+                return href
+
+        return ""
+
+    def _extract_detail_links(self, detail_url: str, html_text: str) -> dict[str, str]:
+        links: dict[str, str] = {}
+
+        for href, text in self._extract_anchors(html_text):
+            lower_href = href.lower()
+            lower_text = text.lower()
+            absolute = urljoin(detail_url, href)
+
+            if "leaflet" in lower_href or "leaflet" in lower_text:
+                links.setdefault("COA", absolute)
+
+            if "safety data sheet" in lower_text or ("sds" in lower_text and "product code" not in lower_text):
+                links.setdefault("MSDS", absolute)
+
+            if "oofgoods" in lower_href or "origin of goods" in lower_text:
+                links.setdefault("COO", absolute)
+
+        return links
+
+    def _extract_anchors(self, html_text: str) -> list[tuple[str, str]]:
+        anchors: list[tuple[str, str]] = []
+        pattern = re.compile(r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', flags=re.IGNORECASE | re.DOTALL)
+
+        for match in pattern.finditer(html_text):
+            href = html.unescape(match.group(1).strip())
+            text_raw = re.sub(r"<[^>]+>", " ", match.group(2))
+            text = html.unescape(re.sub(r"\s+", " ", text_raw).strip())
+            anchors.append((href, text))
+
+        return anchors
+
+    def _resolve_edqm_sds_pdf(self, sds_url: str) -> str:
+        session = self._require_session()
+
+        try:
+            resp = session.get(sds_url, timeout=REQUEST_TIMEOUT)
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            logger.warning("Could not resolve EDQM SDS page %s: %s", sds_url, exc)
+            return sds_url
+
+        content_type = (resp.headers.get("content-type") or "").lower()
+        if "application/pdf" in content_type:
+            return resp.url
+
+        anchors = self._extract_anchors(resp.text)
+        pdf_links: list[tuple[str, str]] = []
+
+        for href, text in anchors:
+            if ".pdf" in href.lower() or ".pdf" in text.lower():
+                pdf_links.append((urljoin(resp.url, href), text))
+
+        if not pdf_links:
+            return sds_url
+
+        for href, text in pdf_links:
+            if "english" in text.lower() or "_en.pdf" in href.lower():
+                return href
+
+        return pdf_links[0][0]
+
+    def _download_binary(self, url: str) -> Path:
+        session = self._require_session()
+        try:
+            resp = session.get(url, timeout=REQUEST_TIMEOUT)
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Request failed for {url}: {exc}") from exc
+
+        content_type = (resp.headers.get("content-type") or "").lower()
+        if "text/html" in content_type:
+            raise RuntimeError(f"Document URL returned HTML instead of file: {url}")
+
+        filename = self._filename_from_response(resp, url)
+        destination = self.download_dir / "edqm" / filename
+        destination.write_bytes(resp.content)
+        return destination
+
+    def _filename_from_response(self, resp: requests.Response, url: str) -> str:
+        content_disposition = resp.headers.get("content-disposition", "")
+
+        filename_match = re.search(r"filename\*=UTF-8''([^;]+)", content_disposition, flags=re.IGNORECASE)
+        if filename_match:
+            return self._normalize_filename(filename_match.group(1))
+
+        filename_match = re.search(r'filename="?([^";]+)"?', content_disposition, flags=re.IGNORECASE)
+        if filename_match:
+            return self._normalize_filename(filename_match.group(1))
+
+        parsed = urlparse(url)
+        query = parse_qs(parsed.query)
+
+        for key in ("leaflet", "OofGoods", "oofgoods"):
+            if key in query and query[key]:
+                return self._normalize_filename(query[key][0])
+
+        basename = Path(parsed.path).name
+        if basename:
+            return self._normalize_filename(basename)
+
+        content_type = (resp.headers.get("content-type") or "").lower()
+        ext = ".pdf" if "application/pdf" in content_type else ".bin"
+        return f"download{ext}"
+
+    def _normalize_filename(self, name: str) -> str:
+        name = (name or "").strip()
+        name = re.sub(r"[\\\r\n\t]", "", name)
+        name = re.sub(r'[\\/*?:"<>|]', "_", name)
+        return name or "download.bin"
 
     def _convert_coo_to_country_txt(self, source_path: Path, product_code: str) -> Path:
         """Create COO output as a country-named .txt file and remove original file."""
-        country = self._extract_country_from_file(source_path) or "Unknown Country"
+        country = self._extract_country_from_file(source_path, product_code) or "Unknown Country"
         filename = f"{self._safe_filename(country)}.txt"
         destination = source_path.with_name(filename)
 
-        # Avoid accidental overwrite when multiple products share the same country.
         if destination.exists() and destination.resolve() != source_path.resolve():
             destination = source_path.with_name(
                 f"{self._safe_filename(country)}_{self._safe_filename(product_code)}.txt"
             )
 
         destination.write_text(country + "\n", encoding="utf-8")
-        logger.info(f"Generated COO country file: {destination.name}")
+        logger.info("Generated COO country file: %s", destination.name)
 
         if source_path.exists() and source_path.resolve() != destination.resolve():
             try:
                 source_path.unlink()
             except OSError as exc:
-                logger.warning(f"Could not remove original COO file {source_path.name}: {exc}")
+                logger.warning("Could not remove original COO file %s: %s", source_path.name, exc)
 
         return destination
 
-    def _extract_country_from_file(self, source_path: Path) -> str:
+    def _extract_country_from_file(self, source_path: Path, product_code: str = "") -> str:
         text = self._read_text(source_path)
         if not text:
             return ""
+
+        # EDQM COO PDFs contain a table where country is in the last column.
+        edqm_table_country = self._extract_edqm_table_country(text, product_code)
+        if edqm_table_country:
+            return edqm_table_country
 
         patterns = [
             r"country\s*of\s*origin\s*[:\-]\s*([A-Za-z][A-Za-z\s\-',().]{1,80})",
@@ -273,7 +369,6 @@ class EDQMDownloader:
                 if candidate:
                     return candidate
 
-        # Fallback: inspect nearby lines if the value is on the next line.
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         for idx, line in enumerate(lines):
             normalized = line.lower()
@@ -290,6 +385,34 @@ class EDQMDownloader:
 
         return ""
 
+    def _extract_edqm_table_country(self, text: str, product_code: str) -> str:
+        compact = re.sub(r"\s+", " ", text)
+
+        if product_code:
+            escaped_code = re.escape(product_code)
+            match = re.search(
+                rf"{escaped_code}\s+\d+\s+[A-Za-z][A-Za-z\s\-]{1,40}\s+([A-Za-z][A-Za-z\s\-',().]{{1,60}}?)(?:\s+\*Information|\s+The material|\s+EDQM|\s*$)",
+                compact,
+                flags=re.IGNORECASE,
+            )
+            if match:
+                candidate = self._clean_country_candidate(match.group(1))
+                if candidate:
+                    return candidate
+
+        # Fallback without product code.
+        match = re.search(
+            r"components\s+[A-Z0-9]+\s+\d+\s+[A-Za-z][A-Za-z\s\-]{1,40}\s+([A-Za-z][A-Za-z\s\-',().]{1,60}?)(?:\s+\*Information|\s+The material|\s+EDQM|\s*$)",
+            compact,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            candidate = self._clean_country_candidate(match.group(1))
+            if candidate:
+                return candidate
+
+        return ""
+
     def _read_text(self, source_path: Path) -> str:
         suffix = source_path.suffix.lower()
         if suffix == ".pdf" and PdfReader:
@@ -297,14 +420,14 @@ class EDQMDownloader:
                 reader = PdfReader(str(source_path))
                 return "\n".join((page.extract_text() or "") for page in reader.pages)
             except Exception as exc:
-                logger.warning(f"Failed to parse COO PDF {source_path.name}: {exc}")
+                logger.warning("Failed to parse COO PDF %s: %s", source_path.name, exc)
 
         try:
             raw = source_path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             raw = source_path.read_text(encoding="latin-1", errors="ignore")
         except Exception as exc:
-            logger.warning(f"Failed to read COO file {source_path.name}: {exc}")
+            logger.warning("Failed to read COO file %s: %s", source_path.name, exc)
             return ""
 
         return re.sub(r"<[^>]+>", " ", raw)
@@ -318,6 +441,9 @@ class EDQMDownloader:
 
         if not value:
             return ""
+        lowered = value.lower()
+        if any(token in lowered for token in ("origin", "country", "component", "catalogue", "batch", "preferential")):
+            return ""
         if any(char.isdigit() for char in value):
             return ""
         if len(value.split()) > 6:
@@ -329,3 +455,22 @@ class EDQMDownloader:
         normalized = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
         sanitized = re.sub(r'[\\/*?:"<>|]', "_", normalized).strip().strip(".")
         return sanitized or "Unknown_Country"
+
+    @staticmethod
+    def _compact(value: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "", (value or "").lower())
+
+    def _fetch_text(self, url: str) -> str:
+        session = self._require_session()
+        try:
+            resp = session.get(url, timeout=REQUEST_TIMEOUT)
+            resp.raise_for_status()
+            return resp.text
+        except requests.RequestException as exc:
+            logger.warning("Failed to fetch %s: %s", url, exc)
+            return ""
+
+    def _require_session(self) -> requests.Session:
+        if not self._session:
+            raise RuntimeError("EDQMDownloader.start() must be called before use")
+        return self._session

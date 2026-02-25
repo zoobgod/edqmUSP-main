@@ -1,13 +1,11 @@
-"""Streamlit UI for edqmUSP - Download & Upload COA/MSDS/COO documents."""
+"""Streamlit UI for edqmUSP - public document download + YDisk upload."""
 
 import logging
-import streamlit as st
 from pathlib import Path
 
-from src.config import (
-    YDISK_TOKEN, EDQM_USERNAME, EDQM_PASSWORD,
-    USP_USERNAME, USP_PASSWORD, DOWNLOAD_DIR,
-)
+import streamlit as st
+
+from src.config import DOWNLOAD_DIR, YDISK_TOKEN
 from src.downloaders.edqm import EDQMDownloader
 from src.downloaders.usp import USPDownloader
 from src.uploaders.ydisk import YDiskUploader
@@ -16,38 +14,71 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 st.set_page_config(page_title="edqmUSP", page_icon="📄", layout="wide")
 st.title("edqmUSP - Document Downloader & Uploader")
-st.caption("Download COA, MSDS and COO from EDQM and USP, then upload to Yandex Disk.")
+st.caption(
+    "Download COA, MSDS and COO from EDQM/USP public pages, then upload to Yandex Disk."
+)
 
-# --- Sidebar: Configuration ---
 with st.sidebar:
     st.header("Configuration")
 
-    st.subheader("EDQM Credentials")
-    edqm_user = st.text_input("EDQM Username", value=EDQM_USERNAME, type="default")
-    edqm_pass = st.text_input("EDQM Password", value=EDQM_PASSWORD, type="password")
-
-    st.subheader("USP Credentials")
-    usp_user = st.text_input("USP Username", value=USP_USERNAME, type="default")
-    usp_pass = st.text_input("USP Password", value=USP_PASSWORD, type="password")
+    st.info("EDQM and USP downloads use public URLs. Login credentials are not required.")
 
     st.subheader("Yandex Disk")
     ydisk_token = st.text_input("YDisk Token", value=YDISK_TOKEN, type="password")
-    ydisk_connected = False
-    if ydisk_token:
-        if st.button("Test YDisk Connection"):
-            uploader = YDiskUploader(token=ydisk_token)
-            if uploader.connect():
-                st.success("Connected to Yandex Disk")
-                ydisk_connected = True
-            else:
-                st.error("Failed to connect. Check your token.")
+    if ydisk_token and st.button("Test YDisk Connection"):
+        uploader = YDiskUploader(token=ydisk_token)
+        if uploader.connect():
+            st.success("Connected to Yandex Disk")
+        else:
+            st.error("Failed to connect. Check your token.")
 
     st.subheader("Settings")
-    headless = st.checkbox("Headless browser", value=True)
     download_dir = st.text_input("Download directory", value=str(DOWNLOAD_DIR))
 
+
+def _download_documents(source: str, codes: list[str], doc_types: list[str], base_dir: Path):
+    progress = st.progress(0)
+    status = st.empty()
+    results_container = st.container()
+
+    downloader_cls = EDQMDownloader if source == "edqm" else USPDownloader
+    downloader = downloader_cls(download_dir=base_dir)
+    downloader.start()
+
+    try:
+        total = max(1, len(codes) * len(doc_types))
+        done = 0
+
+        for code in codes:
+            status.info(f"Searching for {code}...")
+            if downloader.search_product(code):
+                for doc in doc_types:
+                    status.info(f"Downloading {doc} for {code}...")
+                    result = downloader.download_document(code, doc)
+                    done += 1
+                    progress.progress(done / total)
+
+                    with results_container:
+                        if result.success:
+                            st.success(f"{code} {doc}: {result.file_path}")
+                        else:
+                            st.error(f"{code} {doc}: {result.error}")
+            else:
+                for doc in doc_types:
+                    done += 1
+                    progress.progress(done / total)
+                    with results_container:
+                        st.error(f"{code} {doc}: Product not found")
+
+        status.success(f"{source.upper()} downloads complete!")
+    finally:
+        downloader.stop()
+
+
 # --- Main Area: Tabs ---
-tab_edqm, tab_usp, tab_upload, tab_status = st.tabs(["EDQM Download", "USP Download", "Upload to YDisk", "Downloaded Files"])
+tab_edqm, tab_usp, tab_upload, tab_status = st.tabs(
+    ["EDQM Download", "USP Download", "Upload to YDisk", "Downloaded Files"]
+)
 
 # --- EDQM Tab ---
 with tab_edqm:
@@ -65,52 +96,8 @@ with tab_edqm:
         codes = [c.strip() for c in edqm_codes.strip().splitlines() if c.strip()]
         if not codes:
             st.warning("Enter at least one product code.")
-        elif not edqm_user or not edqm_pass:
-            st.warning("Enter EDQM credentials in the sidebar.")
         else:
-            progress = st.progress(0)
-            status = st.empty()
-            results_container = st.container()
-
-            dl = EDQMDownloader(
-                username=edqm_user,
-                password=edqm_pass,
-                download_dir=Path(download_dir),
-                headless=headless,
-            )
-            dl.start()
-
-            try:
-                status.info("Logging in to EDQM...")
-                if not dl.login():
-                    st.error("EDQM login failed. Check credentials.")
-                else:
-                    total = len(codes) * len(edqm_doc_types)
-                    done = 0
-                    for code in codes:
-                        status.info(f"Searching for {code}...")
-                        if dl.search_product(code):
-                            for doc in edqm_doc_types:
-                                status.info(f"Downloading {doc} for {code}...")
-                                result = dl.download_document(code, doc)
-                                done += 1
-                                progress.progress(done / total)
-                                with results_container:
-                                    if result.success:
-                                        st.success(f"{code} {doc}: {result.file_path}")
-                                    else:
-                                        st.error(f"{code} {doc}: {result.error}")
-                                dl._driver.back()
-                        else:
-                            for doc in edqm_doc_types:
-                                done += 1
-                                progress.progress(done / total)
-                                with results_container:
-                                    st.error(f"{code} {doc}: Product not found")
-
-                    status.success("EDQM downloads complete!")
-            finally:
-                dl.stop()
+            _download_documents("edqm", codes, edqm_doc_types, Path(download_dir))
 
 # --- USP Tab ---
 with tab_usp:
@@ -121,7 +108,9 @@ with tab_usp:
         height=150,
     )
     usp_doc_types = st.multiselect(
-        "Document types", ["COA", "MSDS"], default=["COA", "MSDS"],
+        "Document types",
+        ["COA", "MSDS", "COO"],
+        default=["COA", "MSDS", "COO"],
         key="usp_doc_types",
     )
 
@@ -129,51 +118,8 @@ with tab_usp:
         codes = [c.strip() for c in usp_codes.strip().splitlines() if c.strip()]
         if not codes:
             st.warning("Enter at least one catalogue number.")
-        elif not usp_user or not usp_pass:
-            st.warning("Enter USP credentials in the sidebar.")
         else:
-            progress = st.progress(0)
-            status = st.empty()
-            results_container = st.container()
-
-            dl = USPDownloader(
-                username=usp_user,
-                password=usp_pass,
-                download_dir=Path(download_dir),
-                headless=headless,
-            )
-            dl.start()
-
-            try:
-                status.info("Logging in to USP...")
-                if not dl.login():
-                    st.error("USP login failed. Check credentials.")
-                else:
-                    total = len(codes) * len(usp_doc_types)
-                    done = 0
-                    for code in codes:
-                        status.info(f"Searching for {code}...")
-                        if dl.search_product(code):
-                            for doc in usp_doc_types:
-                                status.info(f"Downloading {doc} for {code}...")
-                                result = dl.download_document(code, doc)
-                                done += 1
-                                progress.progress(done / total)
-                                with results_container:
-                                    if result.success:
-                                        st.success(f"{code} {doc}: {result.file_path}")
-                                    else:
-                                        st.error(f"{code} {doc}: {result.error}")
-                        else:
-                            for doc in usp_doc_types:
-                                done += 1
-                                progress.progress(done / total)
-                                with results_container:
-                                    st.error(f"{code} {doc}: Product not found")
-
-                    status.success("USP downloads complete!")
-            finally:
-                dl.stop()
+            _download_documents("usp", codes, usp_doc_types, Path(download_dir))
 
 # --- Upload Tab ---
 with tab_upload:
@@ -200,10 +146,7 @@ with tab_upload:
                 elif upload_source == "USP downloads":
                     dirs_to_upload = [("usp", dl_path / "usp")]
                 else:
-                    dirs_to_upload = [
-                        ("edqm", dl_path / "edqm"),
-                        ("usp", dl_path / "usp"),
-                    ]
+                    dirs_to_upload = [("edqm", dl_path / "edqm"), ("usp", dl_path / "usp")]
 
                 for subfolder, dir_path in dirs_to_upload:
                     if not dir_path.exists():

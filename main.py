@@ -7,9 +7,8 @@ Usage:
     python main.py upload edqm
 """
 
-import sys
 import logging
-from pathlib import Path
+import sys
 
 from src.config import DOWNLOAD_DIR
 from src.downloaders.edqm import EDQMDownloader
@@ -26,31 +25,23 @@ logger = logging.getLogger(__name__)
 def cmd_edqm(codes: list[str]):
     """Download documents from EDQM."""
     with EDQMDownloader() as dl:
-        if not dl.login():
-            logger.error("EDQM login failed")
-            sys.exit(1)
-
         for code in codes:
-            logger.info(f"Processing EDQM product: {code}")
+            logger.info("Processing EDQM product: %s", code)
             results = dl.download_all(code)
             for r in results:
                 status = "OK" if r.success else f"FAIL ({r.error})"
-                logger.info(f"  {r.doc_type}: {status}")
+                logger.info("  %s: %s", r.doc_type, status)
 
 
 def cmd_usp(codes: list[str]):
     """Download documents from USP."""
     with USPDownloader() as dl:
-        if not dl.login():
-            logger.error("USP login failed")
-            sys.exit(1)
-
         for code in codes:
-            logger.info(f"Processing USP product: {code}")
+            logger.info("Processing USP product: %s", code)
             results = dl.download_all(code)
             for r in results:
                 status = "OK" if r.success else f"FAIL ({r.error})"
-                logger.info(f"  {r.doc_type}: {status}")
+                logger.info("  %s: %s", r.doc_type, status)
 
 
 def cmd_upload(source: str = "all"):
@@ -68,12 +59,12 @@ def cmd_upload(source: str = "all"):
 
     for subfolder, dir_path in sources:
         if not dir_path.exists():
-            logger.info(f"No {subfolder.upper()} downloads directory")
+            logger.info("No %s downloads directory", subfolder.upper())
             continue
         results = uploader.upload_directory(dir_path, subfolder)
         for fname, success in results.items():
             status = "OK" if success else "FAIL"
-            logger.info(f"  {fname}: {status}")
+            logger.info("  %s: %s", fname, status)
 
 
 def main():

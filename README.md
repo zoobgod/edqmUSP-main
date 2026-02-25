@@ -1,15 +1,23 @@
 # edqmUSP
 
-Download COA, MSDS and COO from EDQM and USP websites, then upload to Yandex Disk.
+Download COA, MSDS and COO documents from EDQM and USP public websites, then optionally upload files to Yandex Disk.
+
+## What Changed
+
+- No login is required for EDQM or USP downloads.
+- USP search now uses public catalogue APIs instead of deprecated search URLs.
+- USP COA/MSDS downloads use direct static document links resolved from catalogue metadata.
+- COO output is always a country-named `.txt` file (for example, `United_States.txt`).
+- EDQM downloads are now direct HTTP downloads (no browser automation required).
 
 ## Features
 
 - **EDQM downloads** - COA, MSDS, COO from [crs.edqm.eu](https://crs.edqm.eu/)
-- **COO country output** - COO is converted to a country-named `.txt` file (for example, `France.txt`)
-- **USP downloads** - COA, MSDS from [store.usp.org](https://store.usp.org/)
-- **Yandex Disk upload** - automatic upload of downloaded documents
-- **Streamlit web UI** - browser-based interface for easy operation
-- **CLI** - command-line interface for scripting and automation
+- **USP downloads** - COA, MSDS, COO from [store.usp.org](https://store.usp.org/)
+- **COO country output** - COO is normalized to a country-named `.txt` file
+- **Yandex Disk upload** - upload EDQM/USP download folders
+- **Streamlit UI** - web interface
+- **CLI** - scriptable command-line usage
 
 ## Setup
 
@@ -19,19 +27,15 @@ pip install -r requirements.txt
 
 ### Configuration
 
-1. Copy `.env.example` to `.env` and fill in your credentials:
+1. Copy `.env.example` to `.env`:
    ```bash
    cp .env.example .env
    ```
-
-2. **Yandex Disk token**: Either set `YDISK_TOKEN` in `.env` or paste your token into `ydisk_token.txt`.
-   Get a token at: https://yandex.ru/dev/disk/poligon/
-
-3. Add your EDQM and USP login credentials to `.env`.
+2. Set `YDISK_TOKEN` in `.env` or put it in `ydisk_token.txt`.
 
 ## Usage
 
-### Web UI (Streamlit)
+### Web UI
 
 ```bash
 streamlit run app.py
@@ -57,18 +61,16 @@ python main.py upload edqm
 
 ```
 edqmUSP/
-├── app.py                  # Streamlit web UI
-├── main.py                 # CLI entry point
+├── app.py
+├── main.py
 ├── requirements.txt
-├── .env.example            # Environment template
-├── ydisk_token.txt         # YDisk token file (gitignored)
-├── .gitignore
+├── .env.example
+├── ydisk_token.txt
 └── src/
-    ├── config.py           # Configuration loader
-    ├── browser.py          # Selenium browser factory
+    ├── config.py
     ├── downloaders/
-    │   ├── edqm.py         # EDQM document downloader
-    │   └── usp.py          # USP document downloader
+    │   ├── edqm.py
+    │   └── usp.py
     └── uploaders/
-        └── ydisk.py        # Yandex Disk uploader
+        └── ydisk.py
 ```
