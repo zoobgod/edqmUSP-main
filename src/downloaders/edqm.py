@@ -22,6 +22,11 @@ from urllib3.util.retry import Retry
 from src.config import DOWNLOAD_DIR, EDQM_PASSWORD, EDQM_USERNAME, HEADLESS
 
 try:
+    from curl_cffi import requests as curl_requests
+except Exception:  # pragma: no cover
+    curl_requests = None
+
+try:
     from pypdf import PdfReader
 except Exception:  # pragma: no cover
     PdfReader = None
@@ -32,10 +37,14 @@ EDQM_BASE_URL = "https://crs.edqm.eu"
 EDQM_SEARCH_URL = f"{EDQM_BASE_URL}/db/4DCGI/search"
 SIGMA_SDS_URL_TEMPLATE = "https://www.sigmaaldrich.com/SE/en/sds/sial/{code}?userType=anonymous"
 SIGMA_SDS_URL_TEMPLATE_US = "https://www.sigmaaldrich.com/US/en/sds/sial/{code}?userType=anonymous"
+SIGMA_SDS_URL_TEMPLATE_SE_NO_QUERY = "https://www.sigmaaldrich.com/SE/en/sds/sial/{code}"
+SIGMA_SDS_URL_TEMPLATE_US_NO_QUERY = "https://www.sigmaaldrich.com/US/en/sds/sial/{code}"
 SIGMA_PRODUCT_URL_TEMPLATE = "https://www.sigmaaldrich.com/US/en/product/sial/{code}"
+SIGMA_IMPERSONATE = "chrome124"
 
 REQUEST_TIMEOUT = 30
 SIGMA_REQUEST_TIMEOUT = (8, 15)
+SIGMA_CURL_TIMEOUT = 12
 
 
 @dataclass
@@ -224,7 +233,6 @@ class EDQMDownloader:
         return None, " | ".join(errors)
 
     def _download_sigma_msds(self, product_code: str) -> tuple[Path | None, str]:
-        session = self._require_session()
         sigma_code = self._sigma_catalog_code(product_code)
         if not sigma_code:
             return None, "Sigma fallback failed: invalid product code"
@@ -234,23 +242,12 @@ class EDQMDownloader:
 
         errors: list[str] = []
         for sigma_page_url in self._sigma_candidate_urls(sigma_code):
-            try:
-                page_resp = session.get(
-                    sigma_page_url,
-                    timeout=SIGMA_REQUEST_TIMEOUT,
-                    headers={
-                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                        "Accept-Language": "en-US,en;q=0.9",
-                        "Referer": EDQM_BASE_URL,
-                        "Connection": "keep-alive",
-                    },
-                )
-            except requests.RequestException as exc:
-                errors.append(f"{sigma_page_url}: {exc}")
-                error_text = str(exc).lower()
-                if isinstance(exc, requests.Timeout) or "timed out" in error_text:
-                    # All candidate URLs are on the same host; timeout usually means this runtime cannot reach Sigma.
-                    break
+            page_resp, req_error = self._sigma_get(
+                sigma_page_url,
+                accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            )
+            if req_error:
+                errors.append(f"{sigma_page_url}: {req_error}")
                 continue
 
             if not page_resp.ok:
@@ -290,19 +287,12 @@ class EDQMDownloader:
         return self._sigma_reachable
 
     def _download_sigma_pdf_url(self, product_code: str, pdf_url: str) -> tuple[Path | None, str]:
-        session = self._require_session()
-        try:
-            pdf_resp = session.get(
-                pdf_url,
-                timeout=SIGMA_REQUEST_TIMEOUT,
-                headers={
-                    "Accept": "application/pdf,*/*;q=0.8",
-                    "Accept-Language": "en-US,en;q=0.9",
-                    "Connection": "keep-alive",
-                },
-            )
-        except requests.RequestException as exc:
-            return None, f"PDF request failed for {pdf_url}: {exc}"
+        pdf_resp, req_error = self._sigma_get(
+            pdf_url,
+            accept="application/pdf,*/*;q=0.8",
+        )
+        if req_error:
+            return None, f"PDF request failed for {pdf_url}: {req_error}"
 
         if not pdf_resp.ok:
             return None, f"PDF request returned HTTP {pdf_resp.status_code} for {pdf_url}"
@@ -316,18 +306,12 @@ class EDQMDownloader:
         if not nested_pdf_url or nested_pdf_url == pdf_url:
             return None, "Sigma SDS did not resolve to a PDF document"
 
-        try:
-            nested_resp = session.get(
-                nested_pdf_url,
-                timeout=SIGMA_REQUEST_TIMEOUT,
-                headers={
-                    "Accept": "application/pdf,*/*;q=0.8",
-                    "Accept-Language": "en-US,en;q=0.9",
-                    "Connection": "keep-alive",
-                },
-            )
-        except requests.RequestException as exc:
-            return None, f"Nested PDF request failed for {nested_pdf_url}: {exc}"
+        nested_resp, nested_error = self._sigma_get(
+            nested_pdf_url,
+            accept="application/pdf,*/*;q=0.8",
+        )
+        if nested_error:
+            return None, f"Nested PDF request failed for {nested_pdf_url}: {nested_error}"
 
         if not nested_resp.ok:
             return None, f"Nested PDF request returned HTTP {nested_resp.status_code} for {nested_pdf_url}"
@@ -389,11 +373,46 @@ class EDQMDownloader:
 
     @staticmethod
     def _sigma_candidate_urls(sigma_code: str) -> list[str]:
-        return [
+        urls = [
+            SIGMA_SDS_URL_TEMPLATE_SE_NO_QUERY.format(code=sigma_code),
+            SIGMA_SDS_URL_TEMPLATE_US_NO_QUERY.format(code=sigma_code),
             SIGMA_SDS_URL_TEMPLATE.format(code=sigma_code),
             SIGMA_SDS_URL_TEMPLATE_US.format(code=sigma_code),
             SIGMA_PRODUCT_URL_TEMPLATE.format(code=sigma_code),
         ]
+        unique: list[str] = []
+        for url in urls:
+            if url not in unique:
+                unique.append(url)
+        return unique
+
+    def _sigma_get(self, url: str, accept: str) -> tuple[object, str]:
+        headers = {
+            "Accept": accept,
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": EDQM_BASE_URL,
+            "Connection": "keep-alive",
+        }
+
+        if curl_requests is not None:
+            try:
+                resp = curl_requests.get(
+                    url,
+                    headers=headers,
+                    timeout=SIGMA_CURL_TIMEOUT,
+                    impersonate=SIGMA_IMPERSONATE,
+                    allow_redirects=True,
+                )
+                return resp, ""
+            except Exception as exc:  # pragma: no cover
+                return None, str(exc)
+
+        session = self._require_session()
+        try:
+            resp = session.get(url, headers=headers, timeout=SIGMA_REQUEST_TIMEOUT)
+            return resp, ""
+        except requests.RequestException as exc:
+            return None, str(exc)
 
     def download_all(self, product_code: str) -> list[DownloadResult]:
         """Download COA, MSDS and COO for an EDQM code."""
