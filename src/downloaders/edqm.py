@@ -9,6 +9,7 @@ from __future__ import annotations
 import html
 import logging
 import re
+import socket
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,7 +35,7 @@ SIGMA_SDS_URL_TEMPLATE_US = "https://www.sigmaaldrich.com/US/en/sds/sial/{code}?
 SIGMA_PRODUCT_URL_TEMPLATE = "https://www.sigmaaldrich.com/US/en/product/sial/{code}"
 
 REQUEST_TIMEOUT = 30
-SIGMA_REQUEST_TIMEOUT = (10, 25)
+SIGMA_REQUEST_TIMEOUT = (8, 15)
 
 
 @dataclass
@@ -64,6 +65,7 @@ class EDQMDownloader:
 
     _session: requests.Session | None = field(default=None, repr=False)
     _current: ProductContext | None = field(default=None, repr=False)
+    _sigma_reachable: bool | None = field(default=None, repr=False)
 
     def __enter__(self):
         self.start()
@@ -104,6 +106,7 @@ class EDQMDownloader:
         if self._session:
             self._session.close()
             self._session = None
+            self._sigma_reachable = None
             logger.info("EDQM HTTP session stopped")
 
     def login(self) -> bool:
@@ -226,6 +229,9 @@ class EDQMDownloader:
         if not sigma_code:
             return None, "Sigma fallback failed: invalid product code"
 
+        if not self._is_sigma_host_reachable():
+            return None, "Sigma SDS fallback failed: host unreachable from runtime"
+
         errors: list[str] = []
         for sigma_page_url in self._sigma_candidate_urls(sigma_code):
             try:
@@ -241,6 +247,10 @@ class EDQMDownloader:
                 )
             except requests.RequestException as exc:
                 errors.append(f"{sigma_page_url}: {exc}")
+                error_text = str(exc).lower()
+                if isinstance(exc, requests.Timeout) or "timed out" in error_text:
+                    # All candidate URLs are on the same host; timeout usually means this runtime cannot reach Sigma.
+                    break
                 continue
 
             if not page_resp.ok:
@@ -265,6 +275,19 @@ class EDQMDownloader:
         if not errors:
             return None, "Sigma SDS fallback failed"
         return None, "Sigma SDS fallback failed: " + " | ".join(errors)
+
+    def _is_sigma_host_reachable(self) -> bool:
+        if self._sigma_reachable is not None:
+            return self._sigma_reachable
+
+        try:
+            conn = socket.create_connection(("www.sigmaaldrich.com", 443), timeout=3)
+            conn.close()
+            self._sigma_reachable = True
+        except OSError:
+            self._sigma_reachable = False
+
+        return self._sigma_reachable
 
     def _download_sigma_pdf_url(self, product_code: str, pdf_url: str) -> tuple[Path | None, str]:
         session = self._require_session()

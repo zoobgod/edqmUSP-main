@@ -89,11 +89,7 @@ def _download_documents(source: str, codes: list[str], doc_types: list[str], bas
                                 and doc == "MSDS"
                                 and "Sigma SDS fallback failed" in result.error
                             ):
-                                st.link_button(
-                                    f"Open Sigma SDS for {code}",
-                                    _sigma_sds_url(code),
-                                    key=f"sigma-open-{code}",
-                                )
+                                st.markdown(f"[Open Sigma SDS for {code}]({_sigma_sds_url(code)})")
             else:
                 for doc in doc_types:
                     done += 1
@@ -108,45 +104,52 @@ def _download_documents(source: str, codes: list[str], doc_types: list[str], bas
 
             with download_container:
                 st.markdown("### Download to your PC")
+                batch_zip_data = _build_batch_zip(source, successful_files, position_names)
+                st.download_button(
+                    label="Download All (Nested ZIP)",
+                    data=batch_zip_data,
+                    file_name=f"{_safe_file_part(source.upper())}_BATCH_{batch_id}.zip",
+                    mime="application/zip",
+                    key=f"zip-batch-{source}-{batch_id}",
+                )
+                st.caption("Contains one ZIP per position bundle.")
+
                 for code in codes:
                     files_by_doc = successful_files.get(code, {})
                     if not files_by_doc:
                         continue
 
                     position_name = position_names.get(code, code)
-                    bundle_name = _bundle_name(source, position_name)
+                    bundle_name = _bundle_name(source, code, position_name)
                     st.markdown(f"**{bundle_name}**")
                     st.caption(f"Catalogue: {code}")
 
-                    cols = st.columns(4)
-                    col_idx = 0
-
-                    for doc in doc_types:
+                    cols = st.columns(5)
+                    for idx, doc in enumerate(("COA", "MSDS", "COO")):
                         file_path = files_by_doc.get(doc)
                         if not file_path or not file_path.exists():
+                            cols[idx].write(f"{doc}: -")
                             continue
 
                         data = file_path.read_bytes()
                         mime = _mime_type_for(file_path)
-                        with cols[col_idx % 4]:
-                            st.download_button(
-                                label=doc,
-                                data=data,
-                                file_name=file_path.name,
-                                mime=mime,
-                                key=f"dl-{source}-{code}-{doc}",
-                            )
-                        col_idx += 1
+                        cols[idx].download_button(
+                            label=doc,
+                            data=data,
+                            file_name=file_path.name,
+                            mime=mime,
+                            key=f"dl-{source}-{batch_id}-{code}-{doc}",
+                        )
 
                     zip_data = _build_zip_for_position(bundle_name, files_by_doc)
-                    with cols[col_idx % 4]:
-                        st.download_button(
-                            label="ZIP",
-                            data=zip_data,
-                            file_name=f"{_safe_file_part(bundle_name)}.zip",
-                            mime="application/zip",
-                            key=f"zip-{source}-{code}",
-                        )
+                    cols[3].download_button(
+                        label="Position ZIP",
+                        data=zip_data,
+                        file_name=f"{_safe_file_part(bundle_name)}.zip",
+                        mime="application/zip",
+                        key=f"zip-{source}-{batch_id}-{code}",
+                    )
+                    cols[4].write("")
     finally:
         downloader.stop()
 
@@ -177,8 +180,8 @@ def _mime_type_for(path: Path) -> str:
     return "application/octet-stream"
 
 
-def _bundle_name(source: str, position_name: str) -> str:
-    return f"{source.upper()}_{position_name}".strip()
+def _bundle_name(source: str, code: str, position_name: str) -> str:
+    return f"{source.upper()}_{code}_{position_name}".strip()
 
 
 def _zip_member_name(bundle_name: str, doc_type: str, file_path: Path) -> str:
@@ -198,6 +201,23 @@ def _build_zip_for_position(bundle_name: str, files_by_doc: dict[str, Path]) -> 
             if not file_path or not file_path.exists():
                 continue
             archive.writestr(_zip_member_name(bundle_name, doc_type, file_path), file_path.read_bytes())
+
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def _build_batch_zip(
+    source: str,
+    successful_files: dict[str, dict[str, Path]],
+    position_names: dict[str, str],
+) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for code, files_by_doc in successful_files.items():
+            position_name = position_names.get(code, code)
+            bundle_name = _bundle_name(source, code, position_name)
+            pos_zip = _build_zip_for_position(bundle_name, files_by_doc)
+            archive.writestr(f"{_safe_file_part(bundle_name)}.zip", pos_zip)
 
     buffer.seek(0)
     return buffer.getvalue()
@@ -223,7 +243,7 @@ def _record_batch(
     positions = []
     for code, files_by_doc in successful_files.items():
         position_name = position_names.get(code, code)
-        bundle_name = _bundle_name(source, position_name)
+        bundle_name = _bundle_name(source, code, position_name)
         file_entries = []
 
         for doc_type in ("COA", "MSDS", "COO"):
