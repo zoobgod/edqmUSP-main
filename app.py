@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 from src.config import DOWNLOAD_DIR, YDISK_TOKEN
 from src.downloaders.edqm import EDQMDownloader
@@ -316,6 +317,302 @@ def _collect_download_file_rows(base_dir: Path) -> list[dict[str, str | float]]:
     return rows
 
 
+def _get_query_param(name: str) -> str:
+    try:
+        value = st.query_params.get(name, "")
+        if isinstance(value, list):
+            return str(value[0]) if value else ""
+        return str(value or "")
+    except Exception:
+        try:
+            params = st.experimental_get_query_params()
+            values = params.get(name, [])
+            return str(values[0]) if values else ""
+        except Exception:
+            return ""
+
+
+def _flappy_game_html() -> str:
+    return """
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        background: #f4efe6;
+        font-family: "Trebuchet MS", Verdana, sans-serif;
+        color: #2d2a26;
+      }
+      .wrap {
+        width: 100%;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 0 0;
+      }
+      #game {
+        width: 420px;
+        height: 620px;
+        max-width: 95vw;
+        border: 2px solid #2d2a26;
+        border-radius: 12px;
+        box-shadow: 0 10px 24px rgba(0,0,0,0.18);
+        background: #cde7f8;
+      }
+      .hint {
+        font-size: 13px;
+        opacity: 0.9;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <canvas id="game" width="420" height="620"></canvas>
+      <div class="hint">Press Space / Arrow Up / Click to flap</div>
+    </div>
+
+    <script>
+      const canvas = document.getElementById("game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width;
+      const H = canvas.height;
+
+      const gravity = 0.43;
+      const flapImpulse = -7.8;
+      const pipeWidth = 72;
+      const pipeGap = 165;
+      const pipeSpeed = 2.8;
+      const pipeSpawnEvery = 105;
+      const groundHeight = 62;
+
+      let bird = { x: 96, y: H * 0.42, vy: 0, r: 14 };
+      let pipes = [];
+      let frame = 0;
+      let score = 0;
+      let best = 0;
+      let started = false;
+      let gameOver = false;
+
+      function reset() {
+        bird = { x: 96, y: H * 0.42, vy: 0, r: 14 };
+        pipes = [];
+        frame = 0;
+        score = 0;
+        started = false;
+        gameOver = false;
+      }
+
+      function flap() {
+        if (!started) started = true;
+        if (gameOver) {
+          reset();
+          started = true;
+        }
+        bird.vy = flapImpulse;
+      }
+
+      function addPipe() {
+        const minTop = 70;
+        const maxTop = H - groundHeight - pipeGap - 70;
+        const top = minTop + Math.random() * (maxTop - minTop);
+        pipes.push({ x: W + 8, top, passed: false });
+      }
+
+      function collidesPipe(p) {
+        const bx = bird.x;
+        const by = bird.y;
+        const br = bird.r;
+        const withinX = bx + br > p.x && bx - br < p.x + pipeWidth;
+        const hitTop = by - br < p.top;
+        const hitBottom = by + br > p.top + pipeGap;
+        return withinX && (hitTop || hitBottom);
+      }
+
+      function update() {
+        frame += 1;
+
+        if (started && !gameOver) {
+          bird.vy += gravity;
+          bird.y += bird.vy;
+
+          if (frame % pipeSpawnEvery === 0) addPipe();
+
+          for (const p of pipes) {
+            p.x -= pipeSpeed;
+            if (!p.passed && p.x + pipeWidth < bird.x) {
+              p.passed = true;
+              score += 1;
+              best = Math.max(best, score);
+            }
+            if (collidesPipe(p)) gameOver = true;
+          }
+          pipes = pipes.filter(p => p.x + pipeWidth > -4);
+
+          if (bird.y - bird.r < 0) {
+            bird.y = bird.r;
+            bird.vy = 0;
+          }
+          if (bird.y + bird.r > H - groundHeight) {
+            bird.y = H - groundHeight - bird.r;
+            gameOver = true;
+          }
+        } else if (!started) {
+          bird.y += Math.sin(frame / 12) * 0.35;
+        }
+      }
+
+      function drawBackground() {
+        const sky = ctx.createLinearGradient(0, 0, 0, H);
+        sky.addColorStop(0, "#d7f0ff");
+        sky.addColorStop(1, "#b9dfef");
+        ctx.fillStyle = sky;
+        ctx.fillRect(0, 0, W, H);
+
+        ctx.fillStyle = "#8db36f";
+        ctx.fillRect(0, H - groundHeight, W, groundHeight);
+        ctx.fillStyle = "#708e57";
+        ctx.fillRect(0, H - groundHeight, W, 7);
+      }
+
+      function drawPipes() {
+        for (const p of pipes) {
+          ctx.fillStyle = "#3f8e4f";
+          ctx.fillRect(p.x, 0, pipeWidth, p.top);
+          ctx.fillRect(p.x, p.top + pipeGap, pipeWidth, H - (p.top + pipeGap) - groundHeight);
+
+          ctx.fillStyle = "#336f3d";
+          ctx.fillRect(p.x - 4, p.top - 16, pipeWidth + 8, 16);
+          ctx.fillRect(p.x - 4, p.top + pipeGap, pipeWidth + 8, 16);
+        }
+      }
+
+      function drawBird() {
+        ctx.beginPath();
+        ctx.fillStyle = "#f2c14e";
+        ctx.arc(bird.x, bird.y, bird.r, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.fillStyle = "#2d2a26";
+        ctx.arc(bird.x + 5, bird.y - 4, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.fillStyle = "#e57423";
+        ctx.moveTo(bird.x + 11, bird.y);
+        ctx.lineTo(bird.x + 21, bird.y + 3);
+        ctx.lineTo(bird.x + 11, bird.y + 7);
+        ctx.closePath();
+        ctx.fill();
+      }
+
+      function drawHud() {
+        ctx.fillStyle = "#1f1c18";
+        ctx.font = "bold 28px Trebuchet MS, Verdana, sans-serif";
+        ctx.fillText(String(score), 16, 38);
+
+        ctx.font = "bold 14px Trebuchet MS, Verdana, sans-serif";
+        ctx.fillText("BEST " + String(best), 16, 58);
+
+        if (!started) {
+          ctx.fillStyle = "rgba(20,20,20,0.65)";
+          ctx.fillRect(36, 238, W - 72, 92);
+          ctx.fillStyle = "#fff";
+          ctx.font = "bold 24px Trebuchet MS, Verdana, sans-serif";
+          ctx.fillText("Flappy Mini", W / 2 - 72, 274);
+          ctx.font = "14px Trebuchet MS, Verdana, sans-serif";
+          ctx.fillText("Press Space / Click to start", W / 2 - 95, 303);
+        }
+
+        if (gameOver) {
+          ctx.fillStyle = "rgba(20,20,20,0.72)";
+          ctx.fillRect(46, 224, W - 92, 126);
+          ctx.fillStyle = "#fff";
+          ctx.font = "bold 28px Trebuchet MS, Verdana, sans-serif";
+          ctx.fillText("Game Over", W / 2 - 78, 268);
+          ctx.font = "15px Trebuchet MS, Verdana, sans-serif";
+          ctx.fillText("Score " + String(score) + "  Best " + String(best), W / 2 - 76, 296);
+          ctx.fillText("Press Space/Click to retry", W / 2 - 96, 320);
+        }
+      }
+
+      function render() {
+        drawBackground();
+        drawPipes();
+        drawBird();
+        drawHud();
+      }
+
+      function loop() {
+        update();
+        render();
+        requestAnimationFrame(loop);
+      }
+
+      document.addEventListener("keydown", (e) => {
+        if (e.code === "Space" || e.code === "ArrowUp") {
+          e.preventDefault();
+          flap();
+        }
+      });
+      canvas.addEventListener("mousedown", flap);
+      canvas.addEventListener("touchstart", (e) => {
+        e.preventDefault();
+        flap();
+      }, { passive: false });
+
+      render();
+      requestAnimationFrame(loop);
+    </script>
+  </body>
+</html>
+"""
+
+
+def _render_hidden_flappy_game():
+    st.markdown(
+        """
+<style>
+#v-flappy-trigger {
+  position: fixed;
+  right: 12px;
+  bottom: 10px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #111;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  text-decoration: none;
+  opacity: 0.05;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+#v-flappy-trigger:hover {
+  opacity: 0.35;
+}
+</style>
+<a id="v-flappy-trigger" href="?v_game=1" title=" ">V</a>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if _get_query_param("v_game") != "1":
+        return
+
+    st.markdown("### Flappy Mini")
+    st.caption("Hidden mode enabled. Press Space / Arrow Up / click to play.")
+    st.markdown("[Close Game](?v_game=0)")
+    components.html(_flappy_game_html(), height=680, scrolling=False)
+
+
 # --- Main Area: Tabs ---
 tab_edqm, tab_usp, tab_upload, tab_status = st.tabs(
     ["EDQM Download", "USP Download", "Upload to YDisk", "Downloaded Files"]
@@ -458,3 +755,5 @@ with tab_status:
         st.dataframe(file_rows, use_container_width=True, hide_index=True)
     else:
         st.info("No files downloaded yet.")
+
+_render_hidden_flappy_game()
