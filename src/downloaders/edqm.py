@@ -27,6 +27,9 @@ logger = logging.getLogger(__name__)
 
 EDQM_BASE_URL = "https://crs.edqm.eu"
 EDQM_SEARCH_URL = f"{EDQM_BASE_URL}/db/4DCGI/search"
+SIGMA_SDS_URL_TEMPLATE = "https://www.sigmaaldrich.com/SE/en/sds/sial/{code}?userType=anonymous"
+SIGMA_SDS_URL_TEMPLATE_US = "https://www.sigmaaldrich.com/US/en/sds/sial/{code}?userType=anonymous"
+SIGMA_PRODUCT_URL_TEMPLATE = "https://www.sigmaaldrich.com/US/en/product/sial/{code}"
 
 REQUEST_TIMEOUT = 30
 
@@ -148,15 +151,18 @@ class EDQMDownloader:
             return result
 
         doc_url = self._current.links.get(doc_type, "")
-        if not doc_url:
+        if doc_type != "MSDS" and not doc_url:
             result.error = f"{doc_type} link not found"
             return result
 
         try:
             if doc_type == "MSDS":
-                doc_url = self._resolve_edqm_sds_pdf(doc_url)
-
-            downloaded = self._download_binary(doc_url)
+                downloaded, msds_error = self._download_msds_with_fallback(self._current.code, doc_url)
+                if not downloaded:
+                    result.error = msds_error or "MSDS download failed"
+                    return result
+            else:
+                downloaded = self._download_binary(doc_url)
             if doc_type == "COO":
                 downloaded = self._convert_coo_to_country_txt(downloaded, self._current.code)
 
@@ -169,6 +175,168 @@ class EDQMDownloader:
             result.error = str(exc)
             logger.error("Failed EDQM %s for %s: %s", doc_type, self._current.code, exc)
             return result
+
+    def _download_msds_with_fallback(self, product_code: str, edqm_msds_url: str) -> tuple[Path | None, str]:
+        errors: list[str] = []
+
+        if edqm_msds_url:
+            try:
+                resolved_url = self._resolve_edqm_sds_pdf(edqm_msds_url)
+                return self._download_binary(resolved_url), ""
+            except Exception as exc:
+                errors.append(f"EDQM MSDS failed: {exc}")
+                logger.warning("EDQM MSDS failed for %s: %s", product_code, exc)
+        else:
+            errors.append("EDQM MSDS link not found")
+
+        sigma_path, sigma_error = self._download_sigma_msds(product_code)
+        if sigma_path:
+            return sigma_path, ""
+        if sigma_error:
+            errors.append(sigma_error)
+
+        return None, " | ".join(errors)
+
+    def _download_sigma_msds(self, product_code: str) -> tuple[Path | None, str]:
+        session = self._require_session()
+        sigma_code = self._sigma_catalog_code(product_code)
+        if not sigma_code:
+            return None, "Sigma fallback failed: invalid product code"
+
+        errors: list[str] = []
+        for sigma_page_url in self._sigma_candidate_urls(sigma_code):
+            try:
+                page_resp = session.get(
+                    sigma_page_url,
+                    timeout=REQUEST_TIMEOUT,
+                    headers={
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    },
+                )
+            except requests.RequestException as exc:
+                errors.append(f"{sigma_page_url}: {exc}")
+                continue
+
+            if not page_resp.ok:
+                errors.append(f"{sigma_page_url}: HTTP {page_resp.status_code}")
+                continue
+
+            content_type = (page_resp.headers.get("content-type") or "").lower()
+            if "application/pdf" in content_type:
+                return self._save_sigma_msds_file(product_code, page_resp.content), ""
+
+            pdf_url = self._extract_pdf_url_from_html(page_resp.url, page_resp.text)
+            if not pdf_url:
+                errors.append(f"{sigma_page_url}: no PDF link")
+                continue
+
+            downloaded, error = self._download_sigma_pdf_url(product_code, pdf_url)
+            if downloaded:
+                return downloaded, ""
+            if error:
+                errors.append(f"{sigma_page_url}: {error}")
+
+        if not errors:
+            return None, "Sigma SDS fallback failed"
+        return None, "Sigma SDS fallback failed: " + " | ".join(errors)
+
+    def _download_sigma_pdf_url(self, product_code: str, pdf_url: str) -> tuple[Path | None, str]:
+        session = self._require_session()
+        try:
+            pdf_resp = session.get(
+                pdf_url,
+                timeout=REQUEST_TIMEOUT,
+                headers={"Accept": "application/pdf,*/*;q=0.8"},
+            )
+        except requests.RequestException as exc:
+            return None, f"PDF request failed for {pdf_url}: {exc}"
+
+        if not pdf_resp.ok:
+            return None, f"PDF request returned HTTP {pdf_resp.status_code} for {pdf_url}"
+
+        pdf_content_type = (pdf_resp.headers.get("content-type") or "").lower()
+        if "application/pdf" in pdf_content_type or pdf_url.lower().endswith(".pdf"):
+            return self._save_sigma_msds_file(product_code, pdf_resp.content), ""
+
+        # Some Sigma links return an intermediate HTML page that contains the final PDF URL.
+        nested_pdf_url = self._extract_pdf_url_from_html(pdf_resp.url, pdf_resp.text)
+        if not nested_pdf_url or nested_pdf_url == pdf_url:
+            return None, "Sigma SDS did not resolve to a PDF document"
+
+        try:
+            nested_resp = session.get(
+                nested_pdf_url,
+                timeout=REQUEST_TIMEOUT,
+                headers={"Accept": "application/pdf,*/*;q=0.8"},
+            )
+        except requests.RequestException as exc:
+            return None, f"Nested PDF request failed for {nested_pdf_url}: {exc}"
+
+        if not nested_resp.ok:
+            return None, f"Nested PDF request returned HTTP {nested_resp.status_code} for {nested_pdf_url}"
+
+        nested_type = (nested_resp.headers.get("content-type") or "").lower()
+        if "application/pdf" not in nested_type and not nested_pdf_url.lower().endswith(".pdf"):
+            return None, "Nested Sigma SDS response is not a PDF"
+
+        return self._save_sigma_msds_file(product_code, nested_resp.content), ""
+
+    def _save_sigma_msds_file(self, product_code: str, content: bytes) -> Path:
+        filename = f"{self._safe_filename(product_code)}_MSDS_sigma.pdf"
+        destination = self.download_dir / "edqm" / filename
+        destination.write_bytes(content)
+        logger.info("Downloaded Sigma fallback MSDS for %s: %s", product_code, destination)
+        return destination
+
+    def _extract_pdf_url_from_html(self, base_url: str, html_text: str) -> str:
+        if not html_text:
+            return ""
+
+        # First, use parsed anchors so relative links are handled uniformly.
+        candidates: list[str] = []
+        for href, text in self._extract_anchors(html_text):
+            lower_href = href.lower()
+            lower_text = text.lower()
+            if ".pdf" in lower_href or "sds" in lower_href or ".pdf" in lower_text:
+                candidates.append(urljoin(base_url, href))
+
+        # Fallback for JS-embedded URLs.
+        direct_url_matches = re.findall(r'https?://[^"\'>\s]+\.pdf(?:\?[^"\'>\s]*)?', html_text, flags=re.IGNORECASE)
+        for match in direct_url_matches:
+            candidates.append(match)
+
+        escaped_url_matches = re.findall(r'https:\\/\\/[^"\'>\s]+\.pdf(?:\?[^"\'>\s]*)?', html_text, flags=re.IGNORECASE)
+        for match in escaped_url_matches:
+            candidates.append(match.replace("\\/", "/"))
+
+        normalized: list[str] = []
+        for item in candidates:
+            if not item:
+                continue
+            absolute = urljoin(base_url, html.unescape(item.strip()))
+            if absolute not in normalized:
+                normalized.append(absolute)
+
+        for url in normalized:
+            lower = url.lower()
+            if "/sds/" in lower and "/en/" in lower:
+                return url
+        for url in normalized:
+            if "/sds/" in url.lower():
+                return url
+        return normalized[0] if normalized else ""
+
+    @staticmethod
+    def _sigma_catalog_code(product_code: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "", (product_code or "").lower())
+
+    @staticmethod
+    def _sigma_candidate_urls(sigma_code: str) -> list[str]:
+        return [
+            SIGMA_SDS_URL_TEMPLATE.format(code=sigma_code),
+            SIGMA_SDS_URL_TEMPLATE_US.format(code=sigma_code),
+            SIGMA_PRODUCT_URL_TEMPLATE.format(code=sigma_code),
+        ]
 
     def download_all(self, product_code: str) -> list[DownloadResult]:
         """Download COA, MSDS and COO for an EDQM code."""
@@ -329,11 +497,6 @@ class EDQMDownloader:
         country = self._extract_country_from_file(source_path, product_code) or "Unknown Country"
         filename = f"{self._safe_filename(country)}.txt"
         destination = source_path.with_name(filename)
-
-        if destination.exists() and destination.resolve() != source_path.resolve():
-            destination = source_path.with_name(
-                f"{self._safe_filename(country)}_{self._safe_filename(product_code)}.txt"
-            )
 
         destination.write_text(country + "\n", encoding="utf-8")
         logger.info("Generated COO country file: %s", destination.name)

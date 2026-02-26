@@ -372,11 +372,6 @@ class USPDownloader:
         filename = f"{self._safe_filename(country)}.txt"
         output = out_dir / filename
 
-        if output.exists():
-            existing = output.read_text(encoding="utf-8", errors="ignore").strip()
-            if existing.lower() != country.lower():
-                output = out_dir / f"{self._safe_filename(country)}_{self._safe_filename(product.repository_id)}.txt"
-
         output.write_text(country + "\n", encoding="utf-8")
         return output
 

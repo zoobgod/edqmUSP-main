@@ -1,6 +1,9 @@
 """Streamlit UI for edqmUSP - public document download + YDisk upload."""
 
+import io
 import logging
+import re
+import zipfile
 from pathlib import Path
 
 import streamlit as st
@@ -40,6 +43,9 @@ def _download_documents(source: str, codes: list[str], doc_types: list[str], bas
     progress = st.progress(0)
     status = st.empty()
     results_container = st.container()
+    download_container = st.container()
+
+    successful_files: dict[str, dict[str, Path]] = {}
 
     downloader_cls = EDQMDownloader if source == "edqm" else USPDownloader
     downloader = downloader_cls(download_dir=base_dir)
@@ -61,6 +67,7 @@ def _download_documents(source: str, codes: list[str], doc_types: list[str], bas
                     with results_container:
                         if result.success:
                             st.success(f"{code} {doc}: {result.file_path}")
+                            successful_files.setdefault(code, {})[doc] = Path(result.file_path)
                         else:
                             st.error(f"{code} {doc}: {result.error}")
             else:
@@ -71,8 +78,83 @@ def _download_documents(source: str, codes: list[str], doc_types: list[str], bas
                         st.error(f"{code} {doc}: Product not found")
 
         status.success(f"{source.upper()} downloads complete!")
+
+        if successful_files:
+            with download_container:
+                st.markdown("### Download to your PC")
+                for code in codes:
+                    files_by_doc = successful_files.get(code, {})
+                    if not files_by_doc:
+                        continue
+
+                    st.markdown(f"**{code}**")
+                    cols = st.columns(4)
+                    col_idx = 0
+
+                    for doc in doc_types:
+                        file_path = files_by_doc.get(doc)
+                        if not file_path or not file_path.exists():
+                            continue
+
+                        data = file_path.read_bytes()
+                        mime = _mime_type_for(file_path)
+                        with cols[col_idx % 4]:
+                            st.download_button(
+                                label=f"{doc}",
+                                data=data,
+                                file_name=file_path.name,
+                                mime=mime,
+                                key=f"dl-{source}-{code}-{doc}",
+                            )
+                        col_idx += 1
+
+                    zip_data = _build_zip_for_position(code, files_by_doc)
+                    with cols[col_idx % 4]:
+                        st.download_button(
+                            label="ZIP",
+                            data=zip_data,
+                            file_name=f"{_safe_file_part(code)}.zip",
+                            mime="application/zip",
+                            key=f"zip-{source}-{code}",
+                        )
     finally:
         downloader.stop()
+
+
+def _safe_file_part(value: str) -> str:
+    sanitized = re.sub(r'[\\/*?:"<>|]+', "_", (value or "").strip()).strip(".")
+    return sanitized or "position"
+
+
+def _mime_type_for(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix == ".pdf":
+        return "application/pdf"
+    if suffix == ".txt":
+        return "text/plain"
+    return "application/octet-stream"
+
+
+def _zip_member_name(position: str, doc_type: str, file_path: Path) -> str:
+    if doc_type == "COO":
+        # Keep COO naming as country name (.txt).
+        return file_path.name
+
+    suffix = file_path.suffix.lower() or ".pdf"
+    return f"{_safe_file_part(position)}_{doc_type}{suffix}"
+
+
+def _build_zip_for_position(position: str, files_by_doc: dict[str, Path]) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for doc_type in ("COA", "MSDS", "COO"):
+            file_path = files_by_doc.get(doc_type)
+            if not file_path or not file_path.exists():
+                continue
+            archive.writestr(_zip_member_name(position, doc_type, file_path), file_path.read_bytes())
+
+    buffer.seek(0)
+    return buffer.getvalue()
 
 
 # --- Main Area: Tabs ---
