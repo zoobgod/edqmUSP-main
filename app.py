@@ -593,6 +593,8 @@ def _render_hidden_flappy_game():
   z-index: 9999;
   transition: transform 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
   opacity: 0.96;
+  border: 0;
+  cursor: pointer;
 }
 .v-flappy-pill:hover {
   transform: translateY(-1px);
@@ -615,10 +617,28 @@ def _render_hidden_flappy_game():
 }
 </style>
 """
+    js_open = (
+        "var u=new URL(window.parent.location.href);"
+        "u.searchParams.set('v_game','1');"
+        "window.parent.location.href=u.toString();"
+    )
+    js_close = (
+        "var u=new URL(window.parent.location.href);"
+        "u.searchParams.set('v_game','0');"
+        "window.parent.location.href=u.toString();"
+    )
     if game_open:
-        floating_btn += '<a id="v-flappy-close" class="v-flappy-pill" href="?v_game=0">Close Game</a>'
+        floating_btn += (
+            f'<button id="v-flappy-close" class="v-flappy-pill" type="button" onclick="{js_close}">'
+            "Close Game"
+            "</button>"
+        )
     else:
-        floating_btn += '<a id="v-flappy-open" class="v-flappy-pill" href="?v_game=1">Play V-Bird</a>'
+        floating_btn += (
+            f'<button id="v-flappy-open" class="v-flappy-pill" type="button" onclick="{js_open}">'
+            "Play V-Bird"
+            "</button>"
+        )
 
     st.markdown(floating_btn, unsafe_allow_html=True)
 

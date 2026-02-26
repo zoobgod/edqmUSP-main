@@ -1,37 +1,85 @@
 # edqmUSP
 
-Download COA, MSDS and COO documents from EDQM and USP public websites, then optionally upload files to Yandex Disk.
+`edqmUSP` automates document retrieval for EDQM and USP catalogue items.
+It removes manual catalogue browsing by fetching `COA`, `MSDS`, and `COO` files directly, then organizing them for immediate download (single files, per-position ZIP, or batch ZIP).
 
-## What Changed
+## Why This Saves Time
 
-- No login is required for EDQM or USP downloads.
-- USP search now uses public catalogue APIs instead of deprecated search URLs.
-- USP COA/MSDS downloads use direct static document links resolved from catalogue metadata.
-- COO output is always a country-named `.txt` file (for example, `United_States.txt`).
-- EDQM downloads are now direct HTTP downloads (no browser automation required).
+Without automation, users typically search each catalogue item manually and open multiple pages to find `COA`, `MSDS`, and origin data.
 
-## Features
+This app does it in one run:
 
-- **EDQM downloads** - COA, MSDS, COO from [crs.edqm.eu](https://crs.edqm.eu/)
-- **USP downloads** - COA, MSDS, COO from [store.usp.org](https://store.usp.org/)
-- **COO country output** - COO is normalized to a country-named `.txt` file
-- **Yandex Disk upload** - upload EDQM/USP download folders
-- **Streamlit UI** - web interface
-- **CLI** - scriptable command-line usage
+- Searches positions by catalogue code.
+- Downloads available files directly from public endpoints.
+- Applies standardized naming.
+- Bundles results into downloadable ZIP files.
+- Optionally uploads to Yandex Disk.
 
-## Setup
+## What The App Can Do
+
+### EDQM
+
+- Search EDQM positions by exact catalogue code.
+- Download `COA`, `MSDS`, and `COO` from EDQM public pages.
+- If EDQM `MSDS` is missing, fallback to Sigma-Aldrich SDS URLs automatically.
+- EDQM `COO` behavior:
+  - Download the original COO document.
+  - Detect country from document content.
+  - Rename the COO file using country name while keeping original extension (typically `.pdf`).
+  - Example: `France.pdf`.
+
+### USP
+
+- Search USP positions via public product/search APIs.
+- Download `COA` and `MSDS` via public static/document links.
+- USP `COO` behavior:
+  - Create country text file only.
+  - Example: `United States.txt`.
+
+### Streamlit Web UI
+
+- Download by source (`EDQM` / `USP`) and selected document types.
+- Download individual files per position.
+- Download per-position ZIP.
+- Download batch ZIP containing nested ZIPs for each position.
+- View batch history and downloaded files table.
+- Clear download cache from UI.
+- Optional Yandex Disk upload.
+- Includes optional in-app Flappy-style mini game (`Play V-Bird` button).
+
+### CLI
+
+- Download from EDQM by one or many catalogue codes.
+- Download from USP by one or many catalogue codes.
+- Upload downloaded files to Yandex Disk.
+
+## Requirements
+
+- Python 3.10+
+- Network access to:
+  - `crs.edqm.eu`
+  - `store.usp.org`
+  - `static.usp.org`
+  - `www.sigmaaldrich.com` (for EDQM MSDS fallback)
+
+## Installation
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### Configuration
+## Configuration
 
-1. Copy `.env.example` to `.env`:
+1. Copy environment template:
    ```bash
    cp .env.example .env
    ```
-2. Set `YDISK_TOKEN` in `.env` or put it in `ydisk_token.txt`.
+2. Set Yandex Disk token if you need uploads:
+   - `YDISK_TOKEN` in `.env`, or
+   - `ydisk_token.txt`
+
+Note:
+- EDQM and USP downloads do not require login credentials.
 
 ## Usage
 
@@ -44,22 +92,43 @@ streamlit run app.py
 ### CLI
 
 ```bash
-# Download from EDQM
-python main.py edqm Y0001532 Y0001234
+# EDQM download
+python main.py edqm Y0001532 G0400006
 
-# Download from USP
+# USP download
 python main.py usp 1134357
 
-# Upload all downloads to Yandex Disk
+# Upload all downloaded files
 python main.py upload
 
-# Upload only EDQM downloads
+# Upload only EDQM files
 python main.py upload edqm
+
+# Upload only USP files
+python main.py upload usp
 ```
 
-## Project Structure
+## Output Structure
 
-```
+Downloads are saved under:
+
+- `downloads/edqm/`
+- `downloads/usp/`
+
+Typical outputs:
+
+- EDQM:
+  - `<catalogue>_COA.pdf` (or EDQM-provided filename)
+  - `<catalogue>_MSDS_sigma.pdf` (if Sigma fallback used)
+  - `<Country>.pdf` (COO renamed by detected country)
+- USP:
+  - `<catalogue>_COA.pdf`
+  - `<catalogue>_MSDS.pdf`
+  - `<Country>.txt` (COO)
+
+## Project Layout
+
+```text
 edqmUSP/
 ├── app.py
 ├── main.py
