@@ -384,8 +384,8 @@ def _flappy_game_html() -> str:
       const gravity = 0.43;
       const flapImpulse = -7.8;
       const pipeWidth = 72;
-      const pipeGap = 165;
-      const pipeSpeed = 2.8;
+      const pipeGap = 145;
+      const pipeSpeed = 3.35;
       const pipeSpawnEvery = 105;
       const groundHeight = 62;
 
@@ -617,27 +617,17 @@ def _render_hidden_flappy_game():
 }
 </style>
 """
-    js_open = (
-        "var u=new URL(window.parent.location.href);"
-        "u.searchParams.set('v_game','1');"
-        "window.parent.location.href=u.toString();"
-    )
-    js_close = (
-        "var u=new URL(window.parent.location.href);"
-        "u.searchParams.set('v_game','0');"
-        "window.parent.location.href=u.toString();"
-    )
     if game_open:
         floating_btn += (
-            f'<button id="v-flappy-close" class="v-flappy-pill" type="button" onclick="{js_close}">'
+            '<a id="v-flappy-close" class="v-flappy-pill" href="?v_game=0" target="_self" rel="nofollow">'
             "Close Game"
-            "</button>"
+            "</a>"
         )
     else:
         floating_btn += (
-            f'<button id="v-flappy-open" class="v-flappy-pill" type="button" onclick="{js_open}">'
+            '<a id="v-flappy-open" class="v-flappy-pill" href="?v_game=1" target="_self" rel="nofollow">'
             "Play V-Bird"
-            "</button>"
+            "</a>"
         )
 
     st.markdown(floating_btn, unsafe_allow_html=True)
