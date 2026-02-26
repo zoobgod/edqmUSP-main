@@ -574,42 +574,59 @@ def _flappy_game_html() -> str:
 
 
 def _render_hidden_flappy_game():
-    st.markdown(
-        """
+    game_open = _get_query_param("v_game") == "1"
+
+    floating_btn = """
 <style>
-#v-flappy-trigger {
+.v-flappy-pill {
   position: fixed;
-  right: 12px;
-  bottom: 10px;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: #111;
-  color: #fff;
-  font-size: 10px;
+  right: 18px;
+  bottom: 16px;
+  padding: 10px 14px;
+  border-radius: 999px;
+  color: #ffffff !important;
+  font-size: 13px;
   font-weight: 700;
-  text-decoration: none;
-  opacity: 0.05;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  text-decoration: none !important;
+  letter-spacing: 0.1px;
+  box-shadow: 0 10px 24px rgba(0,0,0,0.22);
   z-index: 9999;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
+  opacity: 0.96;
 }
-#v-flappy-trigger:hover {
-  opacity: 0.35;
+.v-flappy-pill:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 12px 28px rgba(0,0,0,0.28);
+  opacity: 1;
+}
+#v-flappy-open {
+  background: linear-gradient(135deg, #0d9488, #0f766e);
+}
+#v-flappy-close {
+  background: linear-gradient(135deg, #b91c1c, #991b1b);
+}
+@media (max-width: 700px) {
+  .v-flappy-pill {
+    right: 12px;
+    bottom: 12px;
+    padding: 9px 12px;
+    font-size: 12px;
+  }
 }
 </style>
-<a id="v-flappy-trigger" href="?v_game=1" title=" ">V</a>
-        """,
-        unsafe_allow_html=True,
-    )
+"""
+    if game_open:
+        floating_btn += '<a id="v-flappy-close" class="v-flappy-pill" href="?v_game=0">Close Game</a>'
+    else:
+        floating_btn += '<a id="v-flappy-open" class="v-flappy-pill" href="?v_game=1">Play V-Bird</a>'
 
-    if _get_query_param("v_game") != "1":
+    st.markdown(floating_btn, unsafe_allow_html=True)
+
+    if not game_open:
         return
 
     st.markdown("### Flappy Mini")
-    st.caption("Hidden mode enabled. Press Space / Arrow Up / click to play.")
-    st.markdown("[Close Game](?v_game=0)")
+    st.caption("Press Space / Arrow Up / click to play.")
     components.html(_flappy_game_html(), height=680, scrolling=False)
 
 
