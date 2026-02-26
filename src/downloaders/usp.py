@@ -207,6 +207,11 @@ class USPDownloader:
 
         return self.search_product(product_code)
 
+    def get_position_name(self, product_code: str) -> str:
+        if self._ensure_current_product(product_code) and self._current_product:
+            return self._current_product.display_name or self._current_product.repository_id
+        return product_code
+
     def _fetch_product(self, product_code: str) -> USPProduct | None:
         session = self._require_session()
         code = product_code.strip()

@@ -15,6 +15,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, urljoin, urlparse
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from src.config import DOWNLOAD_DIR, EDQM_PASSWORD, EDQM_USERNAME, HEADLESS
 
@@ -32,6 +34,7 @@ SIGMA_SDS_URL_TEMPLATE_US = "https://www.sigmaaldrich.com/US/en/sds/sial/{code}?
 SIGMA_PRODUCT_URL_TEMPLATE = "https://www.sigmaaldrich.com/US/en/product/sial/{code}"
 
 REQUEST_TIMEOUT = 30
+SIGMA_REQUEST_TIMEOUT = (10, 25)
 
 
 @dataclass
@@ -46,6 +49,7 @@ class DownloadResult:
 @dataclass
 class ProductContext:
     code: str
+    name: str = ""
     detail_url: str = ""
     detail_html: str = ""
     links: dict[str, str] = field(default_factory=dict)
@@ -71,6 +75,18 @@ class EDQMDownloader:
     def start(self):
         (self.download_dir / "edqm").mkdir(parents=True, exist_ok=True)
         session = requests.Session()
+        retry = Retry(
+            total=1,
+            connect=1,
+            read=0,
+            status=1,
+            backoff_factor=0.5,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=frozenset(["GET", "HEAD"]),
+        )
+        adapter = HTTPAdapter(max_retries=retry, pool_connections=20, pool_maxsize=20)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
         session.headers.update(
             {
                 "User-Agent": (
@@ -131,7 +147,14 @@ class EDQMDownloader:
             return False
 
         links = self._extract_detail_links(detail_url, detail_html)
-        self._current = ProductContext(code=code, detail_url=detail_url, detail_html=detail_html, links=links)
+        name = self._extract_product_name(detail_html) or code
+        self._current = ProductContext(
+            code=code,
+            name=name,
+            detail_url=detail_url,
+            detail_html=detail_html,
+            links=links,
+        )
         logger.info("Resolved EDQM product %s -> %s", code, detail_url)
         return True
 
@@ -208,9 +231,12 @@ class EDQMDownloader:
             try:
                 page_resp = session.get(
                     sigma_page_url,
-                    timeout=REQUEST_TIMEOUT,
+                    timeout=SIGMA_REQUEST_TIMEOUT,
                     headers={
                         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        "Accept-Language": "en-US,en;q=0.9",
+                        "Referer": EDQM_BASE_URL,
+                        "Connection": "keep-alive",
                     },
                 )
             except requests.RequestException as exc:
@@ -245,8 +271,12 @@ class EDQMDownloader:
         try:
             pdf_resp = session.get(
                 pdf_url,
-                timeout=REQUEST_TIMEOUT,
-                headers={"Accept": "application/pdf,*/*;q=0.8"},
+                timeout=SIGMA_REQUEST_TIMEOUT,
+                headers={
+                    "Accept": "application/pdf,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Connection": "keep-alive",
+                },
             )
         except requests.RequestException as exc:
             return None, f"PDF request failed for {pdf_url}: {exc}"
@@ -266,8 +296,12 @@ class EDQMDownloader:
         try:
             nested_resp = session.get(
                 nested_pdf_url,
-                timeout=REQUEST_TIMEOUT,
-                headers={"Accept": "application/pdf,*/*;q=0.8"},
+                timeout=SIGMA_REQUEST_TIMEOUT,
+                headers={
+                    "Accept": "application/pdf,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Connection": "keep-alive",
+                },
             )
         except requests.RequestException as exc:
             return None, f"Nested PDF request failed for {nested_pdf_url}: {exc}"
@@ -368,6 +402,11 @@ class EDQMDownloader:
 
         return self.search_product(product_code)
 
+    def get_position_name(self, product_code: str) -> str:
+        if self._ensure_current_product(product_code) and self._current:
+            return self._current.name or self._current.code
+        return product_code
+
     def _extract_detail_href(self, html_text: str, product_code: str) -> str:
         anchors = self._extract_anchors(html_text)
         code_norm = self._compact(product_code)
@@ -400,6 +439,28 @@ class EDQMDownloader:
                 links.setdefault("COO", absolute)
 
         return links
+
+    def _extract_product_name(self, html_text: str) -> str:
+        fields = self._extract_detail_fields(html_text)
+        for key, value in fields.items():
+            if self._compact(key) == "name" and value:
+                return value
+        return ""
+
+    def _extract_detail_fields(self, html_text: str) -> dict[str, str]:
+        fields: dict[str, str] = {}
+        pattern = re.compile(
+            r'<td[^>]*bgcolor=["\']#ffcc00["\'][^>]*>(.*?)</td>\s*<td[^>]*>(.*?)</td>',
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        for match in pattern.finditer(html_text):
+            raw_key = re.sub(r"<[^>]+>", " ", match.group(1))
+            raw_val = re.sub(r"<[^>]+>", " ", match.group(2))
+            key = html.unescape(re.sub(r"\s+", " ", raw_key).strip())
+            value = html.unescape(re.sub(r"\s+", " ", raw_val).strip())
+            if key and value and key not in fields:
+                fields[key] = value
+        return fields
 
     def _extract_anchors(self, html_text: str) -> list[tuple[str, str]]:
         anchors: list[tuple[str, str]] = []
@@ -553,8 +614,24 @@ class EDQMDownloader:
 
         if product_code:
             escaped_code = re.escape(product_code)
+            line_country = self._extract_country_from_code_lines(text, product_code)
+            if line_country:
+                return line_country
+
             match = re.search(
                 rf"{escaped_code}\s+\d+\s+[A-Za-z][A-Za-z\s\-]{1,40}\s+([A-Za-z][A-Za-z\s\-',().]{{1,60}}?)(?:\s+\*Information|\s+The material|\s+EDQM|\s*$)",
+                compact,
+                flags=re.IGNORECASE,
+            )
+            if match:
+                candidate = self._clean_country_candidate(match.group(1))
+                if candidate:
+                    return candidate
+
+            # Alternative table shape:
+            # "<code> <batch> <material origin>. <country>"
+            match = re.search(
+                rf"{escaped_code}\s+\d+\s+.+?\.\s*([A-Za-z][A-Za-z\s\-',()]+?)(?:\s+\*Information|\s+The material|\s+EDQM|\s*$)",
                 compact,
                 flags=re.IGNORECASE,
             )
@@ -573,6 +650,64 @@ class EDQMDownloader:
             candidate = self._clean_country_candidate(match.group(1))
             if candidate:
                 return candidate
+
+        return ""
+
+    def _extract_country_from_code_lines(self, text: str, product_code: str) -> str:
+        code_norm = self._compact(product_code)
+        if not code_norm:
+            return ""
+
+        for raw_line in text.splitlines():
+            line = re.sub(r"\s+", " ", raw_line).strip()
+            if not line:
+                continue
+            if code_norm not in self._compact(line):
+                continue
+
+            candidate = self._country_from_line_tail(line)
+            if candidate:
+                return candidate
+
+        return ""
+
+    def _country_from_line_tail(self, line: str) -> str:
+        line = re.sub(r"\*.*$", "", line).strip()
+        line = line.replace("", " ").replace("•", " ")
+        stopwords = {
+            "country",
+            "origin",
+            "preferential",
+            "non",
+            "components",
+            "component",
+            "code",
+            "catalogue",
+            "batch",
+            "number",
+            "material",
+            "information",
+            "vegetal",
+            "plant",
+            "palm",
+        }
+
+        segments = [line]
+        if "." in line:
+            segments.insert(0, line.rsplit(".", 1)[1])
+        if ":" in line:
+            segments.insert(0, line.rsplit(":", 1)[1])
+
+        token_pattern = re.compile(r"[A-Za-z][A-Za-z'\\-]*(?:\s+[A-Za-z][A-Za-z'\\-]*){0,3}")
+        for segment in segments:
+            tokens = token_pattern.findall(segment)
+            for token in reversed(tokens):
+                cleaned = self._clean_country_candidate(token)
+                if not cleaned:
+                    continue
+                if cleaned.lower() in stopwords:
+                    continue
+                return cleaned
 
         return ""
 
@@ -601,6 +736,13 @@ class EDQMDownloader:
         value = re.split(r"[;\n\r]", value)[0]
         value = re.sub(r"\s+", " ", value).strip(" .,:-")
         value = re.sub(r"^(is|the)\s+", "", value, flags=re.IGNORECASE)
+
+        # EDQM COO lines can contain material-origin qualifiers before the country.
+        qualifiers = {"synthetic", "vegetal", "plant", "animal", "mineral", "chemical", "biological"}
+        parts = value.split()
+        while len(parts) > 1 and parts[0].lower() in qualifiers:
+            parts = parts[1:]
+        value = " ".join(parts)
 
         if not value:
             return ""
