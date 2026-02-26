@@ -17,7 +17,7 @@ from src.uploaders.ydisk import YDiskUploader
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-st.set_page_config(page_title="edqmUSP", page_icon="📄", layout="wide")
+st.set_page_config(page_title="edqmUSP", page_icon="V", layout="wide")
 st.title("edqmUSP - Document Downloader & Uploader")
 st.caption(
     "Download COA, MSDS and COO from EDQM/USP public pages, then upload to Yandex Disk."
@@ -32,21 +32,19 @@ def _init_state():
 _init_state()
 
 with st.sidebar:
-    st.header("Configuration")
-
     st.info("EDQM and USP downloads use public URLs. Login credentials are not required.")
+    with st.expander("Configuration", expanded=False):
+        st.subheader("Yandex Disk")
+        ydisk_token = st.text_input("YDisk Token", value=YDISK_TOKEN, type="password")
+        if ydisk_token and st.button("Test YDisk Connection"):
+            uploader = YDiskUploader(token=ydisk_token)
+            if uploader.connect():
+                st.success("Connected to Yandex Disk")
+            else:
+                st.error("Failed to connect. Check your token.")
 
-    st.subheader("Yandex Disk")
-    ydisk_token = st.text_input("YDisk Token", value=YDISK_TOKEN, type="password")
-    if ydisk_token and st.button("Test YDisk Connection"):
-        uploader = YDiskUploader(token=ydisk_token)
-        if uploader.connect():
-            st.success("Connected to Yandex Disk")
-        else:
-            st.error("Failed to connect. Check your token.")
-
-    st.subheader("Settings")
-    download_dir = st.text_input("Download directory", value=str(DOWNLOAD_DIR))
+        st.subheader("Settings")
+        download_dir = st.text_input("Download directory", value=str(DOWNLOAD_DIR))
 
 
 def _download_documents(source: str, codes: list[str], doc_types: list[str], base_dir: Path):
@@ -186,7 +184,7 @@ def _bundle_name(source: str, code: str, position_name: str) -> str:
 
 def _zip_member_name(bundle_name: str, doc_type: str, file_path: Path) -> str:
     if doc_type == "COO":
-        # Keep COO naming as country name (.txt).
+        # Keep COO naming as country-derived source filename (pdf/txt).
         return file_path.name
 
     suffix = file_path.suffix.lower() or ".pdf"

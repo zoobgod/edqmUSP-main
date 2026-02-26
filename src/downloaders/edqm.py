@@ -1,7 +1,7 @@
 """EDQM public document downloader.
 
 Downloads COA, MSDS and COO from https://crs.edqm.eu/ without login.
-COO output is normalized into a country-named `.txt` file.
+COO output keeps original file type and is renamed by detected country.
 """
 
 from __future__ import annotations
@@ -199,7 +199,7 @@ class EDQMDownloader:
             else:
                 downloaded = self._download_binary(doc_url)
             if doc_type == "COO":
-                downloaded = self._convert_coo_to_country_txt(downloaded, self._current.code)
+                downloaded = self._rename_coo_with_country(downloaded, self._current.code)
 
             result.success = True
             result.file_path = str(downloaded)
@@ -595,20 +595,31 @@ class EDQMDownloader:
         name = re.sub(r'[\\/*?:"<>|]', "_", name)
         return name or "download.bin"
 
-    def _convert_coo_to_country_txt(self, source_path: Path, product_code: str) -> Path:
-        """Create COO output as a country-named .txt file and remove original file."""
+    def _rename_coo_with_country(self, source_path: Path, product_code: str) -> Path:
+        """Rename downloaded COO file to country-based filename while keeping original extension."""
         country = self._extract_country_from_file(source_path, product_code) or "Unknown Country"
-        filename = f"{self._safe_filename(country)}.txt"
+        suffix = source_path.suffix.lower() or ".pdf"
+        filename = f"{self._safe_filename(country)}{suffix}"
         destination = source_path.with_name(filename)
 
-        destination.write_text(country + "\n", encoding="utf-8")
-        logger.info("Generated COO country file: %s", destination.name)
+        if destination.exists() and destination.resolve() != source_path.resolve():
+            idx = 2
+            while True:
+                candidate = source_path.with_name(f"{self._safe_filename(country)}_{idx}{suffix}")
+                if not candidate.exists():
+                    destination = candidate
+                    break
+                idx += 1
 
         if source_path.exists() and source_path.resolve() != destination.resolve():
             try:
-                source_path.unlink()
+                source_path.replace(destination)
             except OSError as exc:
-                logger.warning("Could not remove original COO file %s: %s", source_path.name, exc)
+                logger.warning("Could not rename COO file %s -> %s: %s", source_path.name, destination.name, exc)
+                destination.write_bytes(source_path.read_bytes())
+                source_path.unlink(missing_ok=True)
+
+        logger.info("Renamed COO file by country: %s", destination.name)
 
         return destination
 
