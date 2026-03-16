@@ -627,6 +627,64 @@ def _parse_lines(raw: str) -> list[str]:
     return values
 
 
+def _clean_lookup_fragment(value: str) -> str:
+    text = html.unescape(value or "")
+    text = re.sub(r"\([^)]*(?:edqm|usp)[^)]*\)", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\[[^\]]*(?:edqm|usp)[^\]]*\]", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*[-|]\s*(?:edqm|usp)\s*$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip(" \t\r\n-_/|,;")
+    return text
+
+
+def _strip_lookup_suffix_tokens(value: str) -> str:
+    tokens = [token for token in re.split(r"\s+", value or "") if token]
+    while tokens and tokens[-1].rstrip(".,").upper() in {"RS", "CRS"}:
+        tokens.pop()
+    return " ".join(tokens).strip()
+
+
+def _lookup_query_candidates(raw_query: str) -> list[str]:
+    base = _clean_lookup_fragment(raw_query)
+    if not base:
+        return []
+
+    split_parts = re.split(r"\s*[/|;]\s*", base)
+    candidates: list[str] = []
+
+    def add(value: str):
+        cleaned = _clean_lookup_fragment(value)
+        if cleaned and cleaned not in candidates:
+            candidates.append(cleaned)
+        stripped = _strip_lookup_suffix_tokens(cleaned)
+        if stripped and stripped not in candidates:
+            candidates.append(stripped)
+
+    latin_parts = [part for part in split_parts if re.search(r"[A-Za-z]", part or "")]
+    for part in latin_parts:
+        add(part)
+
+    add(base)
+
+    for part in split_parts:
+        add(part)
+
+    if not candidates:
+        add(raw_query)
+
+    return candidates
+
+
+def _search_lookup_candidates(downloader, raw_query: str, limit: int = 8) -> tuple[list, str]:
+    attempted: list[str] = []
+    for candidate in _lookup_query_candidates(raw_query):
+        attempted.append(candidate)
+        matches = downloader.search_products_by_name(candidate, limit=limit)
+        if matches:
+            return matches, candidate
+    fallback = attempted[0] if attempted else raw_query.strip()
+    return [], fallback
+
+
 def _bundle_name(source: str, code: str, position_name: str) -> str:
     return f"{source.upper()}_{code}_{position_name}".strip()
 
@@ -739,7 +797,7 @@ def _lookup_catalogue_numbers(source: str, names: list[str], limit: int = 8) -> 
 
             with EDQMDownloader(download_dir=tmp_path) as downloader:
                 for query in names:
-                    matches = downloader.search_products_by_name(query, limit=limit)
+                    matches, _used_candidate = _search_lookup_candidates(downloader, query, limit=limit)
                     if matches:
                         for match in matches:
                             rows.append(
@@ -758,7 +816,7 @@ def _lookup_catalogue_numbers(source: str, names: list[str], limit: int = 8) -> 
 
             with USPDownloader(download_dir=tmp_path) as downloader:
                 for query in names:
-                    matches = downloader.search_products_by_name(query, limit=limit)
+                    matches, _used_candidate = _search_lookup_candidates(downloader, query, limit=limit)
                     if matches:
                         for match in matches:
                             rows.append(
