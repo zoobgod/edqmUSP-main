@@ -57,6 +57,7 @@ This app does it in one run:
 - Landing page on the root domain.
 - Dedicated downloader page on the same domain.
 - Dedicated bulk catalogue-finder page on the same domain.
+- Copy-ready lookup output for catalogue numbers and full table data.
 - Built on FastAPI for Vercel deployment, while reusing the same EDQM/USP downloader logic.
 
 ## Requirements
@@ -101,6 +102,8 @@ This repository now includes:
 
 - `api/index.py` - Vercel-compatible FastAPI entrypoint
 - `vercel.json` - root rewrite configuration for same-domain routing
+- `src/services/lookup.py` - shared lookup parsing/candidate generation
+- `src/services/bundles.py` - shared ZIP/bundle helpers used by app surfaces
 
 After pushing to Vercel, the main routes are:
 
@@ -159,9 +162,26 @@ edqmUSP/
 │   └── index.py
 └── src/
     ├── config.py
+    ├── services/
+    │   ├── bundles.py
+    │   └── lookup.py
     ├── downloaders/
     │   ├── edqm.py
     │   └── usp.py
     └── uploaders/
         └── ydisk.py
+```
+
+## Tests
+
+The repository includes narrow regression tests for:
+
+- lookup candidate generation
+- bundle/ZIP generation
+- FastAPI lookup/download route behavior
+
+Run them with:
+
+```bash
+python -m unittest discover -s tests -p 'test_*.py' -v
 ```

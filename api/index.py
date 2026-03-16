@@ -16,30 +16,45 @@ from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+try:  # Prefer normal import resolution; only patch sys.path if the runtime needs it.
+    import src  # type: ignore # noqa: F401
+except Exception:  # pragma: no cover
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_ROOT))
 
 app = FastAPI(title="edqmUSP")
+
+# Optional shared services. If another worker extracts helpers into src/services,
+# this frontend will adopt them automatically without changing route behavior.
+try:
+    from src.services import bundles as _bundles_service
+except Exception:  # pragma: no cover
+    _bundles_service = None
+
+try:
+    from src.services import lookup as _lookup_service
+except Exception:  # pragma: no cover
+    _lookup_service = None
 
 APP_CSS = """
 <style>
 :root {
-  --paper: #f4efe6;
-  --paper-2: #fbf8f2;
-  --ink: #1f1b17;
-  --muted: #72685d;
-  --muted-2: #8d8174;
-  --card: rgba(255, 250, 242, 0.82);
-  --line: rgba(106, 91, 73, 0.18);
-  --line-strong: rgba(106, 91, 73, 0.28);
-  --teal: #0d5c63;
-  --teal-2: #12857a;
-  --teal-soft: rgba(18, 133, 122, 0.12);
-  --bronze: #a66a2b;
-  --bronze-2: #c98b3c;
-  --rose: #c45d53;
-  --shadow: 0 22px 60px rgba(50, 35, 20, 0.10);
-  --shadow-soft: 0 10px 28px rgba(50, 35, 20, 0.07);
+  --paper: #e8edf7;
+  --paper-2: #f5f8ff;
+  --ink: #121826;
+  --muted: #5f6f89;
+  --muted-2: #72839d;
+  --card: rgba(255, 255, 255, 0.86);
+  --line: rgba(45, 70, 107, 0.18);
+  --line-strong: rgba(45, 70, 107, 0.34);
+  --teal: #1f58c3;
+  --teal-2: #2d7cff;
+  --teal-soft: rgba(45, 124, 255, 0.14);
+  --bronze: #0f1729;
+  --bronze-2: #243a63;
+  --rose: #d1495b;
+  --shadow: 0 24px 64px rgba(15, 29, 62, 0.14);
+  --shadow-soft: 0 10px 30px rgba(15, 29, 62, 0.09);
   --radius-xl: 28px;
   --radius-lg: 20px;
   --radius-md: 16px;
@@ -49,9 +64,9 @@ html { scroll-behavior: smooth; }
 body {
   margin: 0;
   background:
-    radial-gradient(circle at 15% 15%, rgba(201,139,60,0.22), transparent 22%),
-    radial-gradient(circle at 88% 12%, rgba(13,92,99,0.18), transparent 24%),
-    radial-gradient(circle at 80% 75%, rgba(18,133,122,0.10), transparent 18%),
+    radial-gradient(circle at 12% 12%, rgba(45,124,255,0.26), transparent 24%),
+    radial-gradient(circle at 82% 10%, rgba(64,152,255,0.16), transparent 28%),
+    radial-gradient(circle at 80% 75%, rgba(31,88,195,0.09), transparent 18%),
     linear-gradient(180deg, var(--paper-2), var(--paper));
   color: var(--ink);
   font-family: "Manrope", "Segoe UI", sans-serif;
@@ -87,7 +102,7 @@ body::before {
   margin-bottom: 28px;
   border: 1px solid var(--line);
   border-radius: 999px;
-  background: rgba(251, 248, 242, 0.72);
+  background: linear-gradient(135deg, rgba(13, 23, 43, 0.94), rgba(24, 44, 79, 0.92));
   backdrop-filter: blur(16px);
   box-shadow: var(--shadow-soft);
 }
@@ -120,7 +135,7 @@ body::before {
   font-weight: 600;
 }
 .brand-subtitle {
-  color: var(--muted);
+  color: rgba(210, 223, 247, 0.86);
   font-size: 0.82rem;
   letter-spacing: 0.03em;
   text-transform: uppercase;
@@ -132,18 +147,18 @@ body::before {
   justify-content: flex-end;
 }
 .nav a {
-  color: var(--ink);
+  color: #e8f1ff;
   text-decoration: none;
   padding: 10px 16px;
-  border: 1px solid var(--line);
+  border: 1px solid rgba(146, 176, 228, 0.22);
   border-radius: 999px;
-  background: rgba(255,250,242,0.78);
+  background: rgba(255,255,255,0.06);
   transition: transform 160ms ease, border-color 160ms ease, background 160ms ease, color 160ms ease;
 }
 .nav a:hover {
   transform: translateY(-1px);
-  border-color: var(--line-strong);
-  background: rgba(255,255,255,0.92);
+  border-color: rgba(146, 176, 228, 0.48);
+  background: rgba(255,255,255,0.14);
 }
 .nav a.active {
   background: linear-gradient(135deg, var(--teal), var(--teal-2));
@@ -183,13 +198,18 @@ a {
 .manifest-panel {
   position: relative;
   border: 1px solid var(--line);
-  background: linear-gradient(180deg, rgba(255,252,247,0.92), rgba(255,248,239,0.80));
+  background: linear-gradient(180deg, rgba(255,255,255,0.94), rgba(248,252,255,0.84));
   box-shadow: var(--shadow);
 }
 .hero-shell {
   overflow: hidden;
   padding: 34px;
   border-radius: var(--radius-xl);
+  color: #e8f1ff;
+  background:
+    radial-gradient(circle at 7% 10%, rgba(88, 167, 255, 0.25), transparent 32%),
+    radial-gradient(circle at 88% 14%, rgba(77, 142, 255, 0.3), transparent 36%),
+    linear-gradient(135deg, #0d1730, #182c4f);
 }
 .hero-shell::after {
   content: "";
@@ -199,7 +219,7 @@ a {
   width: 260px;
   height: 260px;
   border-radius: 50%;
-  background: radial-gradient(circle, rgba(201,139,60,0.20), rgba(201,139,60,0.02) 62%, transparent 70%);
+  background: radial-gradient(circle, rgba(130,190,255,0.15), rgba(130,190,255,0.01) 62%, transparent 70%);
   pointer-events: none;
 }
 .hero-grid {
@@ -237,7 +257,7 @@ a {
 }
 .lede {
   max-width: 760px;
-  color: var(--muted);
+  color: rgba(218, 232, 255, 0.9);
   font-size: 1.06rem;
 }
 .hero-actions {
@@ -252,9 +272,9 @@ a {
 .hero-aside {
   padding: 22px;
   background:
-    linear-gradient(180deg, rgba(13,92,99,0.08), rgba(255,255,255,0.65)),
-    rgba(255,255,255,0.65);
-  border: 1px solid rgba(13,92,99,0.12);
+    linear-gradient(180deg, rgba(102, 174, 255, 0.16), rgba(255,255,255,0.04)),
+    rgba(255,255,255,0.04);
+  border: 1px solid rgba(146, 176, 228, 0.24);
 }
 .hero-aside ul,
 .feature-list,
@@ -282,7 +302,7 @@ a {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: linear-gradient(135deg, var(--bronze-2), var(--teal-2));
+  background: linear-gradient(135deg, #8fcbff, #5f9bff);
   transform: translateY(-50%);
 }
 .hero-aside ul {
@@ -447,6 +467,10 @@ textarea {
   gap: 14px;
   margin-bottom: 18px;
 }
+.copy-meta {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
 .copy-actions {
   display: flex;
   gap: 10px;
@@ -464,6 +488,9 @@ textarea {
   font-family: "SFMono-Regular", "Consolas", "Liberation Mono", monospace;
   line-height: 1.5;
   resize: vertical;
+}
+.copy-box.compact {
+  min-height: 92px;
 }
 .table-code {
   font-family: "SFMono-Regular", "Consolas", "Liberation Mono", monospace;
@@ -527,9 +554,9 @@ tbody tr:hover td {
   border-radius: 999px;
   font-size: 0.86rem;
   font-weight: 800;
-  background: rgba(13, 92, 99, 0.08);
-  color: var(--teal);
-  border: 1px solid rgba(13, 92, 99, 0.12);
+  background: rgba(45, 124, 255, 0.12);
+  color: #1f58c3;
+  border: 1px solid rgba(45, 124, 255, 0.22);
 }
 .status-pill.fail {
   background: rgba(196, 93, 83, 0.10);
@@ -574,6 +601,26 @@ pre {
 .microcopy {
   color: var(--muted-2);
   font-size: 0.88rem;
+}
+.task-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 4px;
+}
+.task-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(146, 176, 228, 0.34);
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 0.82rem;
+  color: rgba(232, 241, 255, 0.95);
+}
+.task-pill b {
+  color: #9ec8ff;
 }
 @media (max-width: 700px) {
   .page { padding: 14px 12px 48px; }
@@ -664,6 +711,20 @@ def _safe_filename(value: str) -> str:
     return cleaned or "download"
 
 
+def _service_call(module, names: tuple[str, ...], *args, **kwargs):
+    if module is None:
+        return None
+    for name in names:
+        fn = getattr(module, name, None)
+        if callable(fn):
+            return fn(*args, **kwargs)
+    return None
+
+
+def _parse_vercel_form(raw_body: bytes) -> dict[str, list[str]]:
+    return parse_qs(raw_body.decode("utf-8"), keep_blank_values=True)
+
+
 def _parse_lines(raw: str) -> list[str]:
     values: list[str] = []
     for piece in re.split(r"[\r\n;]+", raw or ""):
@@ -717,6 +778,18 @@ def _prefix_lookup_candidates(value: str, min_words: int = 2, max_words: int = 5
 
 
 def _lookup_query_candidates(raw_query: str) -> list[str]:
+    shared = _service_call(
+        _lookup_service,
+        (
+            "lookup_query_candidates",
+            "build_lookup_candidates",
+            "generate_lookup_candidates",
+        ),
+        raw_query,
+    )
+    if isinstance(shared, list):
+        return [str(item) for item in shared if str(item).strip()]
+
     base = _clean_lookup_fragment(raw_query)
     if not base:
         return []
@@ -754,6 +827,19 @@ def _lookup_query_candidates(raw_query: str) -> list[str]:
 
 
 def _search_lookup_candidates(downloader, raw_query: str, limit: int = 8) -> tuple[list, str]:
+    shared = _service_call(
+        _lookup_service,
+        (
+            "search_lookup_candidates",
+            "search_candidates",
+        ),
+        downloader,
+        raw_query,
+        limit,
+    )
+    if isinstance(shared, tuple) and len(shared) == 2:
+        return shared
+
     attempted: list[str] = []
     for candidate in _lookup_query_candidates(raw_query):
         attempted.append(candidate)
@@ -765,10 +851,34 @@ def _search_lookup_candidates(downloader, raw_query: str, limit: int = 8) -> tup
 
 
 def _bundle_name(source: str, code: str, position_name: str) -> str:
+    shared = _service_call(
+        _bundles_service,
+        (
+            "bundle_name",
+            "build_bundle_name",
+        ),
+        source,
+        code,
+        position_name,
+    )
+    if isinstance(shared, str) and shared.strip():
+        return shared
     return f"{source.upper()}_{code}_{position_name}".strip()
 
 
 def _zip_member_name(bundle_name: str, doc_type: str, file_path: Path) -> str:
+    shared = _service_call(
+        _bundles_service,
+        (
+            "zip_member_name",
+            "build_zip_member_name",
+        ),
+        bundle_name,
+        doc_type,
+        file_path,
+    )
+    if isinstance(shared, str) and shared.strip():
+        return shared
     if doc_type == "COO":
         return file_path.name
     suffix = file_path.suffix.lower() or ".pdf"
@@ -776,6 +886,18 @@ def _zip_member_name(bundle_name: str, doc_type: str, file_path: Path) -> str:
 
 
 def _build_position_zip(bundle_name: str, files_by_doc: dict[str, Path]) -> bytes:
+    shared = _service_call(
+        _bundles_service,
+        (
+            "build_position_zip",
+            "position_zip_bytes",
+        ),
+        bundle_name,
+        files_by_doc,
+    )
+    if isinstance(shared, (bytes, bytearray)):
+        return bytes(shared)
+
     buffer = BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for doc_type in ("COA", "MSDS", "COO"):
@@ -793,6 +915,20 @@ def _build_batch_zip(
     position_names: dict[str, str],
     manifest_text: str,
 ) -> bytes:
+    shared = _service_call(
+        _bundles_service,
+        (
+            "build_batch_zip",
+            "batch_zip_bytes",
+        ),
+        source,
+        successful_files,
+        position_names,
+        manifest_text,
+    )
+    if isinstance(shared, (bytes, bytearray)):
+        return bytes(shared)
+
     buffer = BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for code, files_by_doc in successful_files.items():
@@ -808,6 +944,18 @@ def _build_batch_zip(
 
 
 def _resolve_position_name(downloader, code: str) -> str:
+    shared = _service_call(
+        _bundles_service,
+        (
+            "resolve_position_name",
+            "get_position_name",
+        ),
+        downloader,
+        code,
+    )
+    if isinstance(shared, str) and shared.strip():
+        return shared
+
     getter = getattr(downloader, "get_position_name", None)
     if callable(getter):
         try:
@@ -926,33 +1074,38 @@ def _download_form(
 <section class="hero-shell">
   <div class="hero-grid">
     <div class="hero-copy">
-      <span class="eyebrow">Batch Download Workspace</span>
-      <h1>Generate one clean ZIP instead of searching every catalogue page by hand.</h1>
-      <p class="lede">Drop in EDQM or USP catalogue numbers, select the documents you need, and let the app assemble a download-ready batch with position-level bundles and a manifest.</p>
+      <span class="eyebrow">Download</span>
+      <h1>Batch download by catalogue code.</h1>
+      <p class="lede">Choose source, paste codes, download one batch ZIP.</p>
+      <div class="task-strip">
+        <span class="task-pill"><b>1</b> Select source</span>
+        <span class="task-pill"><b>2</b> Paste codes</span>
+        <span class="task-pill"><b>3</b> Download ZIP</span>
+      </div>
       {note}
       <div class="hero-stats">
         <div class="grid">
           <div class="stat">
-            <span class="stat-value">3 docs</span>
-            <span class="stat-label">COA, MSDS, and COO bundled around each position</span>
+            <span class="stat-value">COA / MSDS / COO</span>
+            <span class="stat-label">Select any combination</span>
           </div>
           <div class="stat">
-            <span class="stat-value">1 ZIP</span>
-            <span class="stat-label">Batch archive generated in one step for the whole request</span>
+            <span class="stat-value">Nested ZIP</span>
+            <span class="stat-label">One position ZIP per code</span>
           </div>
           <div class="stat">
-            <span class="stat-value">0 login</span>
-            <span class="stat-label">Public catalogue access with the same downloader logic as the local app</span>
+            <span class="stat-value">Manifest included</span>
+            <span class="stat-label">Shows missing documents per code</span>
           </div>
         </div>
       </div>
     </div>
     <aside class="hero-aside">
-      <h3>How this batch is structured</h3>
+      <h3>Quick rules</h3>
       <ul>
-        <li>Each position gets its own nested ZIP named after source, code, and position name.</li>
-        <li>The outer archive includes a manifest so failed documents are still visible.</li>
-        <li>EDQM COO keeps the source file and is renamed by country. USP COO remains a country-named text file.</li>
+        <li>Run one source at a time: EDQM or USP.</li>
+        <li>Use one code per line.</li>
+        <li>If a file is missing, check the manifest section.</li>
       </ul>
     </aside>
   </div>
@@ -961,12 +1114,12 @@ def _download_form(
 <section class="surface">
   <div class="form-grid">
     <form method="post" action="/api/index.py?page=download" class="panel">
-      <h2>Download Documents</h2>
-      <p class="muted">Built for quick bulk retrieval when you already know the catalogue numbers.</p>
+      <h2>Batch Input</h2>
+      <p class="muted">Task-first mode: minimal input, direct output.</p>
 
       <div class="field-group">
-        <label for="source">Source</label>
-        <div class="field-hint">Choose the catalogue family to search.</div>
+        <label for="source">1) Source</label>
+        <div class="field-hint">Choose the catalogue family.</div>
         <select id="source" name="source">
           <option value="edqm" {"selected" if source == "edqm" else ""}>EDQM</option>
           <option value="usp" {"selected" if source == "usp" else ""}>USP</option>
@@ -974,14 +1127,14 @@ def _download_form(
       </div>
 
       <div class="field-group">
-        <label for="codes">Catalogue numbers</label>
-        <div class="field-hint">Paste one code per line. Lists copied from spreadsheets are fine.</div>
+        <label for="codes">2) Catalogue numbers</label>
+        <div class="field-hint">Paste one code per line.</div>
         <textarea id="codes" name="codes" placeholder="Y0001532&#10;G0400006&#10;1134357">{_safe_text(codes)}</textarea>
       </div>
 
       <div class="field-group">
-        <label>Documents to include</label>
-        <div class="field-hint">Select only the document types you want packed into the batch ZIP.</div>
+        <label>3) Documents</label>
+        <div class="field-hint">Select what should be included in the ZIP.</div>
         <div class="checks">
           <label><input type="checkbox" name="doc_types" value="COA" {checked("COA")}> COA</label>
           <label><input type="checkbox" name="doc_types" value="MSDS" {checked("MSDS")}> MSDS</label>
@@ -989,25 +1142,17 @@ def _download_form(
         </div>
       </div>
 
-      <button type="submit">Generate Batch ZIP</button>
-      <div class="microcopy" style="margin-top: 12px;">The ZIP downloads directly from this page when the request completes.</div>
+      <button type="submit">Generate ZIP</button>
+      <div class="microcopy" style="margin-top: 12px;">The download starts immediately after processing.</div>
     </form>
 
     <aside class="panel section-stack">
       <div>
-        <h3>Best results</h3>
+        <h3>Notes</h3>
         <ul class="mini-list">
-          <li>Use exact catalogue numbers if you already have them from a spreadsheet or ERP.</li>
-          <li>Mixing EDQM and USP codes in one request is not supported, so run one source at a time.</li>
-          <li>If some documents are unavailable, the manifest will show exactly which step failed.</li>
-        </ul>
-      </div>
-      <div>
-        <h3>Typical workflow</h3>
-        <ul class="step-list">
-          <li>Pick the source.</li>
-          <li>Paste your codes in bulk.</li>
-          <li>Download the generated archive and distribute the nested position ZIPs.</li>
+          <li>Keep source and codes consistent.</li>
+          <li>Manifest shows exact failures per document type.</li>
+          <li>You can re-run quickly with edited code list.</li>
         </ul>
       </div>
     </aside>
@@ -1022,20 +1167,25 @@ def _lookup_form(source: str = "both", names: str = "", table_html: str = "", me
 <section class="hero-shell">
   <div class="hero-grid">
     <div class="hero-copy">
-      <span class="eyebrow">Catalogue Finder</span>
-      <h1>Start from product names and work backward to the right catalogue numbers.</h1>
-      <p class="lede">Use this page when you have raw product names from procurement, QC, or a client list and need to resolve them into EDQM or USP catalogue numbers in bulk.</p>
+      <span class="eyebrow">Lookup</span>
+      <h1>Find catalogue numbers from product names.</h1>
+      <p class="lede">Paste messy lines, get usable EDQM/USP codes.</p>
+      <div class="task-strip">
+        <span class="task-pill"><b>1</b> Paste names</span>
+        <span class="task-pill"><b>2</b> Run lookup</span>
+        <span class="task-pill"><b>3</b> Copy code column</span>
+      </div>
       {note}
       <div class="hero-actions">
-        <a class="button secondary" href="/download">Already have the codes? Go straight to downloads</a>
+        <a class="button secondary" href="/download">Open downloader</a>
       </div>
     </div>
     <aside class="hero-aside">
-      <h3>Designed for bulk lists</h3>
+      <h3>Lookup behavior</h3>
       <ul>
-        <li>Paste one product name per line.</li>
-        <li>Search EDQM, USP, or both in one pass.</li>
-        <li>Review the results table and use the matched codes in the downloader.</li>
+        <li>Tries cleaned variants of each line.</li>
+        <li>Supports combined strings with slashes and notes.</li>
+        <li>Returns closest matches by source.</li>
       </ul>
     </aside>
   </div>
@@ -1044,12 +1194,12 @@ def _lookup_form(source: str = "both", names: str = "", table_html: str = "", me
 <section class="surface">
   <div class="form-grid">
     <form method="post" action="/api/index.py?page=lookup" class="panel">
-      <h2>Find Catalogue Numbers</h2>
-      <p class="muted">A faster alternative to opening the catalogue websites and searching each item by hand.</p>
+      <h2>Lookup Input</h2>
+      <p class="muted">Bulk input optimized for copied task lists.</p>
 
       <div class="field-group">
-        <label for="source">Where should we search?</label>
-        <div class="field-hint">Use both if you are unsure whether the product belongs to EDQM or USP.</div>
+        <label for="source">1) Source</label>
+        <div class="field-hint">Use both if unknown.</div>
         <select id="source" name="source">
           <option value="both" {"selected" if source == "both" else ""}>Both</option>
           <option value="edqm" {"selected" if source == "edqm" else ""}>EDQM</option>
@@ -1058,29 +1208,21 @@ def _lookup_form(source: str = "both", names: str = "", table_html: str = "", me
       </div>
 
       <div class="field-group">
-        <label for="names">Product names, one per line</label>
-        <div class="field-hint">Free-form names are okay. The search returns the closest public catalogue matches it can find.</div>
+        <label for="names">2) Product names</label>
+        <div class="field-hint">One line per item. Mixed-language lines are supported.</div>
         <textarea id="names" name="names" placeholder="PICOTAMIDE MONOHYDRATE CRS&#10;Cisplatin&#10;Glycerol Monostearate 40-55 CRS">{_safe_text(names)}</textarea>
       </div>
 
-      <button type="submit" class="secondary">Find Matching Catalogue Numbers</button>
+      <button type="submit" class="secondary">Run Lookup</button>
     </form>
 
     <aside class="panel section-stack">
       <div>
-        <h3>Good input examples</h3>
+        <h3>Examples</h3>
         <ul class="mini-list">
-          <li>Full pharmacopoeia name if you have it.</li>
-          <li>Short material name like <code>Cisplatin</code>.</li>
-          <li>Multiple positions pasted from a customer request or spreadsheet.</li>
-        </ul>
-      </div>
-      <div>
-        <h3>After the lookup</h3>
-        <ul class="step-list">
-          <li>Copy the matching codes from the results table.</li>
-          <li>Open the downloader page.</li>
-          <li>Generate the document ZIP for the selected positions.</li>
+          <li><code>Raltegravir Impurity E RS / ... (EDQM)</code></li>
+          <li><code>Sodium taurocholate BRP 10000 mg / ...</code></li>
+          <li><code>Cisplatin</code></li>
         </ul>
       </div>
     </aside>
@@ -1094,7 +1236,9 @@ def _lookup_results_table(rows: list[dict[str, str]]) -> str:
     success_count = sum(1 for row in rows if row["code"])
     failed_count = len(rows) - success_count
     catalogue_numbers = [row["code"] for row in rows if row["code"]]
+    unique_codes = list(dict.fromkeys(catalogue_numbers))
     code_column = "\n".join(catalogue_numbers)
+    unique_code_column = "\n".join(unique_codes)
     tsv_rows = ["Query\tSource\tCatalogue Number\tProduct Name"]
     for row in rows:
         tsv_rows.append(
@@ -1123,16 +1267,19 @@ def _lookup_results_table(rows: list[dict[str, str]]) -> str:
     return (
         '<section class="table-panel">'
         '<div class="table-header">'
-        '<div><h3>Lookup Results</h3><p class="muted">Review the closest public catalogue matches returned by the live search.</p></div>'
+        '<div><h3>Lookup Results</h3><p class="muted">Task-ready output for copy/paste into your next step.</p></div>'
         f'<div style="display:flex; gap:10px; flex-wrap:wrap;"><span class="status-pill">{success_count} matches</span>'
         f'<span class="status-pill {"fail" if failed_count else ""}">{failed_count} no-match rows</span></div>'
         "</div>"
         '<div class="copy-tools">'
+        f'<div class="copy-meta">{len(unique_codes)} unique catalogue numbers</div>'
         '<div class="copy-actions">'
         '<button type="button" class="button" onclick="copyFromTextarea(\'catalogue-copy-box\')">Copy Catalogue Numbers</button>'
+        '<button type="button" class="button secondary" onclick="copyFromTextarea(\'catalogue-copy-unique\')">Copy Unique Codes</button>'
         '<button type="button" class="button secondary" onclick="copyFromTextarea(\'catalogue-copy-tsv\')">Copy Table TSV</button>'
         '</div>'
-        f'<textarea id="catalogue-copy-box" class="copy-box" readonly>{_safe_text(code_column)}</textarea>'
+        f'<textarea id="catalogue-copy-box" class="copy-box compact" readonly>{_safe_text(code_column)}</textarea>'
+        f'<textarea id="catalogue-copy-unique" class="copy-box compact" readonly>{_safe_text(unique_code_column)}</textarea>'
         f'<textarea id="catalogue-copy-tsv" class="copy-box" readonly style="min-height: 180px;">{_safe_text(tsv_text)}</textarea>'
         '</div>'
         '<div class="table-wrap"><table><thead><tr>'
@@ -1149,9 +1296,13 @@ def landing_page() -> HTMLResponse:
 <section class="hero-shell">
   <div class="hero-grid">
     <div class="hero-copy">
-      <span class="eyebrow">Regulatory Download Toolkit</span>
-      <h1>Replace catalogue hunting with a cleaner, faster workflow.</h1>
-      <p class="lede">edqmUSP is built to save time when you need certificates and safety documents now, not after opening dozens of catalogue pages. Resolve product names into codes, then generate download-ready ZIPs from the same domain.</p>
+      <span class="eyebrow">edqmUSP</span>
+      <h1>Two focused workflows.</h1>
+      <p class="lede">Run lookup when you only have names. Run download when you already have catalogue codes.</p>
+      <div class="task-strip">
+        <span class="task-pill"><b>Lookup</b> Names -> Codes</span>
+        <span class="task-pill"><b>Download</b> Codes -> Documents</span>
+      </div>
       <div class="hero-actions">
         <a class="button" href="/download">Open Downloader</a>
         <a class="button ghost" href="/lookup">Find Catalogue Numbers</a>
@@ -1160,25 +1311,25 @@ def landing_page() -> HTMLResponse:
         <div class="grid">
           <div class="stat">
             <span class="stat-value">EDQM + USP</span>
-            <span class="stat-label">Two public catalogue sources in one workflow</span>
+            <span class="stat-label">Both public sources supported</span>
           </div>
           <div class="stat">
-            <span class="stat-value">Bulk-first</span>
-            <span class="stat-label">Paste many names or codes at once instead of working one position at a time</span>
+            <span class="stat-value">Bulk input</span>
+            <span class="stat-label">One line per name or code</span>
           </div>
           <div class="stat">
-            <span class="stat-value">Nested ZIPs</span>
-            <span class="stat-label">One batch archive containing organized position bundles</span>
+            <span class="stat-value">Copy-ready output</span>
+            <span class="stat-label">Column copy and TSV copy for fast handoff</span>
           </div>
         </div>
       </div>
     </div>
     <aside class="hero-aside">
-      <h3>What this deployment does well</h3>
+      <h3>Execution model</h3>
       <ul>
-        <li>Direct document retrieval for COA, MSDS, and COO by catalogue number.</li>
-        <li>Bulk catalogue lookup by product name when the code is missing.</li>
-        <li>Organized outputs that are easier to pass downstream to QA, purchasing, or clients.</li>
+        <li>No auth flow for EDQM/USP public endpoints.</li>
+        <li>Download step returns one batch ZIP.</li>
+        <li>Lookup step tolerates noisy input lines.</li>
       </ul>
     </aside>
   </div>
@@ -1188,21 +1339,21 @@ def landing_page() -> HTMLResponse:
   <div class="grid">
     <section class="card">
       <h2>Download Documents</h2>
-      <p class="muted">Use this when you already know the catalogue numbers and want the files packaged immediately.</p>
+      <p class="muted">Use when you already have catalogue numbers.</p>
       <ul class="feature-list" style="display:grid; gap:10px; margin:16px 0 18px;">
-        <li>Batch ZIP output with nested position bundles.</li>
-        <li>COA, MSDS, and COO selection in one request.</li>
-        <li>Manifest included so missing files are visible without guessing.</li>
+        <li>Choose COA, MSDS, COO.</li>
+        <li>Position-level nested ZIP bundles.</li>
+        <li>Manifest for missing documents.</li>
       </ul>
       <a class="button" href="/download">Open Downloader</a>
     </section>
     <section class="card">
       <h2>Find Catalogue Numbers</h2>
-      <p class="muted">Use this when you only have product names and need to resolve them into working EDQM or USP codes.</p>
+      <p class="muted">Use when you only have product names.</p>
       <ul class="feature-list" style="display:grid; gap:10px; margin:16px 0 18px;">
-        <li>Bulk search by product name, one line per item.</li>
         <li>Cross-search EDQM, USP, or both.</li>
-        <li>Results table built for quick copy-and-download workflow.</li>
+        <li>Input cleanup for mixed/noisy strings.</li>
+        <li>Copy catalogue column in one click.</li>
       </ul>
       <a class="button secondary" href="/lookup">Open Catalogue Finder</a>
     </section>
@@ -1234,7 +1385,7 @@ async def _handle_vercel_entry(request: Request):
         return landing_page()
 
     raw_body = await request.body()
-    parsed_form = parse_qs(raw_body.decode("utf-8"), keep_blank_values=True)
+    parsed_form = _parse_vercel_form(raw_body)
 
     def form_first(name: str, default: str = "") -> str:
         values = parsed_form.get(name)

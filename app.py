@@ -1,10 +1,8 @@
 """Streamlit UI for edqmUSP - public document download + YDisk upload."""
 
-import io
 import logging
 import re
 import shutil
-import zipfile
 from datetime import datetime
 from pathlib import Path
 
@@ -13,6 +11,14 @@ import streamlit as st
 from src.config import DOWNLOAD_DIR, YDISK_TOKEN
 from src.downloaders.edqm import EDQMDownloader
 from src.downloaders.usp import USPDownloader
+from src.services.bundles import (
+    build_batch_zip as svc_build_batch_zip,
+    build_position_zip as svc_build_position_zip,
+    bundle_name as svc_bundle_name,
+    mime_type_for as svc_mime_type_for,
+    resolve_position_name as svc_resolve_position_name,
+    safe_file_part as svc_safe_file_part,
+)
 from src.uploaders.ydisk import YDiskUploader
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -153,55 +159,23 @@ def _download_documents(source: str, codes: list[str], doc_types: list[str], bas
 
 
 def _resolve_position_name(downloader, code: str) -> str:
-    getter = getattr(downloader, "get_position_name", None)
-    if callable(getter):
-        try:
-            name = (getter(code) or "").strip()
-            if name:
-                return name
-        except Exception as exc:  # pragma: no cover
-            logging.warning("Could not resolve position name for %s: %s", code, exc)
-    return code
+    return svc_resolve_position_name(downloader, code)
 
 
 def _safe_file_part(value: str) -> str:
-    sanitized = re.sub(r'[\\/*?:"<>|]+', "_", (value or "").strip()).strip(".")
-    return sanitized or "position"
+    return svc_safe_file_part(value)
 
 
 def _mime_type_for(path: Path) -> str:
-    suffix = path.suffix.lower()
-    if suffix == ".pdf":
-        return "application/pdf"
-    if suffix == ".txt":
-        return "text/plain"
-    return "application/octet-stream"
+    return svc_mime_type_for(path)
 
 
 def _bundle_name(source: str, code: str, position_name: str) -> str:
-    return f"{source.upper()}_{code}_{position_name}".strip()
-
-
-def _zip_member_name(bundle_name: str, doc_type: str, file_path: Path) -> str:
-    if doc_type == "COO":
-        # Keep COO naming as country-derived source filename (pdf/txt).
-        return file_path.name
-
-    suffix = file_path.suffix.lower() or ".pdf"
-    return f"{_safe_file_part(bundle_name)}_{doc_type}{suffix}"
+    return svc_bundle_name(source, code, position_name)
 
 
 def _build_zip_for_position(bundle_name: str, files_by_doc: dict[str, Path]) -> bytes:
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for doc_type in ("COA", "MSDS", "COO"):
-            file_path = files_by_doc.get(doc_type)
-            if not file_path or not file_path.exists():
-                continue
-            archive.writestr(_zip_member_name(bundle_name, doc_type, file_path), file_path.read_bytes())
-
-    buffer.seek(0)
-    return buffer.getvalue()
+    return svc_build_position_zip(bundle_name, files_by_doc)
 
 
 def _build_batch_zip(
@@ -209,16 +183,7 @@ def _build_batch_zip(
     successful_files: dict[str, dict[str, Path]],
     position_names: dict[str, str],
 ) -> bytes:
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for code, files_by_doc in successful_files.items():
-            position_name = position_names.get(code, code)
-            bundle_name = _bundle_name(source, code, position_name)
-            pos_zip = _build_zip_for_position(bundle_name, files_by_doc)
-            archive.writestr(f"{_safe_file_part(bundle_name)}.zip", pos_zip)
-
-    buffer.seek(0)
-    return buffer.getvalue()
+    return svc_build_batch_zip(source, successful_files, position_names)
 
 
 def _sigma_sds_url(code: str) -> str:

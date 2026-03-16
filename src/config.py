@@ -31,8 +31,11 @@ USP_USERNAME = os.getenv("USP_USERNAME", "")
 USP_PASSWORD = os.getenv("USP_PASSWORD", "")
 
 # Local
-def _resolve_download_dir() -> Path:
+def _resolve_download_dir(create: bool = True) -> Path:
     preferred = Path(os.getenv("DOWNLOAD_DIR", str(BASE_DIR / "downloads")))
+    if not create:
+        return preferred
+
     candidates = [preferred]
 
     # Vercel/serverless runtimes are typically writable only under /tmp.
@@ -53,7 +56,9 @@ def _resolve_download_dir() -> Path:
     return preferred
 
 
-DOWNLOAD_DIR = _resolve_download_dir()
+DOWNLOAD_DIR = _resolve_download_dir(
+    create=os.getenv("DOWNLOAD_DIR_CREATE_ON_IMPORT", "true").lower() == "true"
+)
 
 # Browser
 HEADLESS = os.getenv("HEADLESS", "true").lower() == "true"
