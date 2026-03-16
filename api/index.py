@@ -643,6 +643,33 @@ def _strip_lookup_suffix_tokens(value: str) -> str:
     return " ".join(tokens).strip()
 
 
+def _strip_lookup_quantity_tokens(value: str) -> str:
+    text = value or ""
+    text = re.sub(
+        r"\b\d+(?:[.,]\d+)?\s*(?:mg|g|kg|mcg|ug|μg|ml|l|mmol|mol|ppm|%)\b",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"\b\d+(?:[.,]\d+)?\b", " ", text)
+    text = re.sub(r"\s+", " ", text).strip(" \t\r\n-_/|,;")
+    return text
+
+
+def _prefix_lookup_candidates(value: str, min_words: int = 2, max_words: int = 5) -> list[str]:
+    words = [word for word in re.split(r"\s+", value or "") if word]
+    if len(words) < min_words:
+        return []
+
+    upper_bound = min(len(words), max_words)
+    prefixes: list[str] = []
+    for size in range(upper_bound, min_words - 1, -1):
+        prefix = " ".join(words[:size]).strip()
+        if prefix and prefix not in prefixes:
+            prefixes.append(prefix)
+    return prefixes
+
+
 def _lookup_query_candidates(raw_query: str) -> list[str]:
     base = _clean_lookup_fragment(raw_query)
     if not base:
@@ -658,6 +685,12 @@ def _lookup_query_candidates(raw_query: str) -> list[str]:
         stripped = _strip_lookup_suffix_tokens(cleaned)
         if stripped and stripped not in candidates:
             candidates.append(stripped)
+        quantity_stripped = _strip_lookup_quantity_tokens(stripped or cleaned)
+        if quantity_stripped and quantity_stripped not in candidates:
+            candidates.append(quantity_stripped)
+        for prefix in _prefix_lookup_candidates(quantity_stripped or stripped or cleaned):
+            if prefix not in candidates:
+                candidates.append(prefix)
 
     latin_parts = [part for part in split_parts if re.search(r"[A-Za-z]", part or "")]
     for part in latin_parts:
