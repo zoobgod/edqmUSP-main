@@ -31,8 +31,29 @@ USP_USERNAME = os.getenv("USP_USERNAME", "")
 USP_PASSWORD = os.getenv("USP_PASSWORD", "")
 
 # Local
-DOWNLOAD_DIR = Path(os.getenv("DOWNLOAD_DIR", str(BASE_DIR / "downloads")))
-DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+def _resolve_download_dir() -> Path:
+    preferred = Path(os.getenv("DOWNLOAD_DIR", str(BASE_DIR / "downloads")))
+    candidates = [preferred]
+
+    # Vercel/serverless runtimes are typically writable only under /tmp.
+    tmp_fallback = Path("/tmp/edqmUSP-downloads")
+    if tmp_fallback not in candidates:
+        candidates.append(tmp_fallback)
+
+    last_error: Exception | None = None
+    for candidate in candidates:
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            return candidate
+        except OSError as exc:
+            last_error = exc
+
+    if last_error is not None:
+        raise last_error
+    return preferred
+
+
+DOWNLOAD_DIR = _resolve_download_dir()
 
 # Browser
 HEADLESS = os.getenv("HEADLESS", "true").lower() == "true"

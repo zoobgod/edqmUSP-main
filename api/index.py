@@ -4,14 +4,20 @@ from __future__ import annotations
 
 import html
 import re
+import sys
 import zipfile
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from urllib.parse import parse_qs
 
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 app = FastAPI(title="edqmUSP")
 
@@ -328,43 +334,46 @@ def _lookup_catalogue_numbers(source: str, names: list[str], limit: int = 8) -> 
     rows: list[dict[str, str]] = []
     source = source.lower()
 
-    if source in {"edqm", "both"}:
-        from src.downloaders.edqm import EDQMDownloader
+    with TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
 
-        with EDQMDownloader() as downloader:
-            for query in names:
-                matches = downloader.search_products_by_name(query, limit=limit)
-                if matches:
-                    for match in matches:
-                        rows.append(
-                            {
-                                "query": query,
-                                "source": "EDQM",
-                                "code": match.product_code,
-                                "name": match.name,
-                            }
-                        )
-                else:
-                    rows.append({"query": query, "source": "EDQM", "code": "", "name": "No match found"})
+        if source in {"edqm", "both"}:
+            from src.downloaders.edqm import EDQMDownloader
 
-    if source in {"usp", "both"}:
-        from src.downloaders.usp import USPDownloader
+            with EDQMDownloader(download_dir=tmp_path) as downloader:
+                for query in names:
+                    matches = downloader.search_products_by_name(query, limit=limit)
+                    if matches:
+                        for match in matches:
+                            rows.append(
+                                {
+                                    "query": query,
+                                    "source": "EDQM",
+                                    "code": match.product_code,
+                                    "name": match.name,
+                                }
+                            )
+                    else:
+                        rows.append({"query": query, "source": "EDQM", "code": "", "name": "No match found"})
 
-        with USPDownloader() as downloader:
-            for query in names:
-                matches = downloader.search_products_by_name(query, limit=limit)
-                if matches:
-                    for match in matches:
-                        rows.append(
-                            {
-                                "query": query,
-                                "source": "USP",
-                                "code": match.product_code,
-                                "name": match.name,
-                            }
-                        )
-                else:
-                    rows.append({"query": query, "source": "USP", "code": "", "name": "No match found"})
+        if source in {"usp", "both"}:
+            from src.downloaders.usp import USPDownloader
+
+            with USPDownloader(download_dir=tmp_path) as downloader:
+                for query in names:
+                    matches = downloader.search_products_by_name(query, limit=limit)
+                    if matches:
+                        for match in matches:
+                            rows.append(
+                                {
+                                    "query": query,
+                                    "source": "USP",
+                                    "code": match.product_code,
+                                    "name": match.name,
+                                }
+                            )
+                    else:
+                        rows.append({"query": query, "source": "USP", "code": "", "name": "No match found"})
 
     return rows
 
@@ -378,7 +387,7 @@ def _download_form(source: str = "edqm", codes: str = "", message: str = "") -> 
   <h1>Instant Document Download</h1>
   <p>Paste catalogue numbers, choose the source and documents, and the app will generate one downloadable batch ZIP instead of making you search each item manually.</p>
   {note}
-  <form method="post" action="/download">
+  <form method="post" action="/api/index.py?page=download">
     <label for="source">Source</label>
     <select id="source" name="source">
       <option value="edqm" {"selected" if source == "edqm" else ""}>EDQM</option>
@@ -408,7 +417,7 @@ def _lookup_form(source: str = "both", names: str = "", table_html: str = "", me
   <h1>Catalogue Finder</h1>
   <p>Paste product names in bulk and get catalogue numbers back without opening EDQM or USP catalogues manually. Use one line per product name and search EDQM, USP, or both at once.</p>
   {note}
-  <form method="post" action="/lookup">
+  <form method="post" action="/api/index.py?page=lookup">
     <label for="source">Where should we search?</label>
     <select id="source" name="source">
       <option value="both" {"selected" if source == "both" else ""}>Both</option>
@@ -492,16 +501,25 @@ async def _handle_vercel_entry(request: Request):
             return lookup_page()
         return landing_page()
 
-    form = await request.form()
+    raw_body = await request.body()
+    parsed_form = parse_qs(raw_body.decode("utf-8"), keep_blank_values=True)
+
+    def form_first(name: str, default: str = "") -> str:
+        values = parsed_form.get(name)
+        return values[0] if values else default
+
+    def form_list(name: str) -> list[str]:
+        return parsed_form.get(name, [])
+
     if page == "download":
-        source = str(form.get("source") or "edqm")
-        codes = str(form.get("codes") or "")
-        doc_types = [str(value) for value in form.getlist("doc_types")]
+        source = form_first("source", "edqm")
+        codes = form_first("codes", "")
+        doc_types = [str(value) for value in form_list("doc_types")]
         return download_documents(source=source, codes=codes, doc_types=doc_types)
 
     if page == "lookup":
-        source = str(form.get("source") or "both")
-        names = str(form.get("names") or "")
+        source = form_first("source", "both")
+        names = form_first("names", "")
         return lookup_catalogue_numbers(source=source, names=names)
 
     return landing_page()
@@ -529,7 +547,16 @@ def download_documents(
     if not clean_doc_types:
         return _page("Download Documents", _download_form(source=source, codes=codes, message="Select at least one document type."), active="download")
 
-    batch_zip, manifest_text, position_count = _download_batch(source, clean_codes, clean_doc_types)
+    try:
+        batch_zip, manifest_text, position_count = _download_batch(source, clean_codes, clean_doc_types)
+    except Exception as exc:
+        body = _download_form(
+            source=source,
+            codes=codes,
+            message=f"Download failed: {exc}",
+        )
+        return _page("Download Documents", body, active="download")
+
     if not batch_zip:
         body = _download_form(source=source, codes=codes, message="No files were downloaded. See manifest below.") + f"<pre>{_safe_text(manifest_text)}</pre>"
         return _page("Download Documents", body, active="download")
@@ -560,7 +587,15 @@ def lookup_catalogue_numbers(
             active="lookup",
         )
 
-    rows = _lookup_catalogue_numbers(source, clean_names)
+    try:
+        rows = _lookup_catalogue_numbers(source, clean_names)
+    except Exception as exc:
+        return _page(
+            "Find Catalogue Numbers",
+            _lookup_form(source=source, names=names, message=f"Lookup failed: {exc}"),
+            active="lookup",
+        )
+
     table_html = _lookup_results_table(rows)
     return _page(
         "Find Catalogue Numbers",
