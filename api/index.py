@@ -442,6 +442,34 @@ textarea {
 .table-wrap {
   overflow-x: auto;
 }
+.copy-tools {
+  display: grid;
+  gap: 14px;
+  margin-bottom: 18px;
+}
+.copy-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.copy-box {
+  width: 100%;
+  min-height: 132px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  background: rgba(255,255,255,0.88);
+  color: var(--ink);
+  font: inherit;
+  font-family: "SFMono-Regular", "Consolas", "Liberation Mono", monospace;
+  line-height: 1.5;
+  resize: vertical;
+}
+.table-code {
+  font-family: "SFMono-Regular", "Consolas", "Liberation Mono", monospace;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
 .table-panel {
   margin-top: 24px;
   padding: 18px;
@@ -567,6 +595,23 @@ pre {
 </style>
 """
 
+APP_SCRIPT = """
+<script>
+function copyFromTextarea(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.focus();
+  el.select();
+  el.setSelectionRange(0, el.value.length);
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(el.value).catch(() => document.execCommand('copy'));
+    return;
+  }
+  document.execCommand('copy');
+}
+</script>
+"""
+
 
 def _page(title: str, body: str, active: str = "") -> HTMLResponse:
     nav_items = [
@@ -589,6 +634,7 @@ def _page(title: str, body: str, active: str = "") -> HTMLResponse:
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     {APP_CSS}
+    {APP_SCRIPT}
   </head>
   <body>
     <main class="page">
@@ -1047,6 +1093,21 @@ def _lookup_form(source: str = "both", names: str = "", table_html: str = "", me
 def _lookup_results_table(rows: list[dict[str, str]]) -> str:
     success_count = sum(1 for row in rows if row["code"])
     failed_count = len(rows) - success_count
+    catalogue_numbers = [row["code"] for row in rows if row["code"]]
+    code_column = "\n".join(catalogue_numbers)
+    tsv_rows = ["Query\tSource\tCatalogue Number\tProduct Name"]
+    for row in rows:
+        tsv_rows.append(
+            "\t".join(
+                [
+                    row["query"],
+                    row["source"],
+                    row["code"],
+                    row["name"],
+                ]
+            )
+        )
+    tsv_text = "\n".join(tsv_rows)
     body = []
     for row in rows:
         status = row["code"] if row["code"] else "No match"
@@ -1055,7 +1116,7 @@ def _lookup_results_table(rows: list[dict[str, str]]) -> str:
             "<tr>"
             f"<td>{_safe_text(row['query'])}</td>"
             f"<td>{_safe_text(row['source'])}</td>"
-            f'<td class="{klass}">{_safe_text(status)}</td>'
+            f'<td class="{klass} table-code">{_safe_text(status)}</td>'
             f"<td>{_safe_text(row['name'])}</td>"
             "</tr>"
         )
@@ -1066,6 +1127,14 @@ def _lookup_results_table(rows: list[dict[str, str]]) -> str:
         f'<div style="display:flex; gap:10px; flex-wrap:wrap;"><span class="status-pill">{success_count} matches</span>'
         f'<span class="status-pill {"fail" if failed_count else ""}">{failed_count} no-match rows</span></div>'
         "</div>"
+        '<div class="copy-tools">'
+        '<div class="copy-actions">'
+        '<button type="button" class="button" onclick="copyFromTextarea(\'catalogue-copy-box\')">Copy Catalogue Numbers</button>'
+        '<button type="button" class="button secondary" onclick="copyFromTextarea(\'catalogue-copy-tsv\')">Copy Table TSV</button>'
+        '</div>'
+        f'<textarea id="catalogue-copy-box" class="copy-box" readonly>{_safe_text(code_column)}</textarea>'
+        f'<textarea id="catalogue-copy-tsv" class="copy-box" readonly style="min-height: 180px;">{_safe_text(tsv_text)}</textarea>'
+        '</div>'
         '<div class="table-wrap"><table><thead><tr>'
         "<th>Query</th><th>Source</th><th>Catalogue Number</th><th>Product Name</th>"
         "</tr></thead><tbody>"
