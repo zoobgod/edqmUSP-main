@@ -10,7 +10,7 @@ from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from fastapi import FastAPI, Form
+from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
 
 from src.downloaders.edqm import EDQMDownloader
@@ -400,21 +400,21 @@ def _lookup_form(source: str = "both", names: str = "", table_html: str = "", me
     note = f'<p class="note">{_safe_text(message)}</p>' if message else ""
     return f"""
 <section class="hero">
-  <h1>Find Catalogue Numbers</h1>
-  <p>Paste one or many product names and get matching catalogue numbers from EDQM, USP, or both. This is built for bulk lookup, so you can paste one item per line.</p>
+  <h1>Catalogue Finder</h1>
+  <p>Paste product names in bulk and get catalogue numbers back without opening EDQM or USP catalogues manually. Use one line per product name and search EDQM, USP, or both at once.</p>
   {note}
   <form method="post" action="/lookup">
-    <label for="source">Search source</label>
+    <label for="source">Where should we search?</label>
     <select id="source" name="source">
       <option value="both" {"selected" if source == "both" else ""}>Both</option>
       <option value="edqm" {"selected" if source == "edqm" else ""}>EDQM</option>
       <option value="usp" {"selected" if source == "usp" else ""}>USP</option>
     </select>
 
-    <label for="names">Product names</label>
-    <textarea id="names" name="names" placeholder="PICOTAMIDE MONOHYDRATE CRS&#10;Cisplatin">{_safe_text(names)}</textarea>
+    <label for="names">Product names, one per line</label>
+    <textarea id="names" name="names" placeholder="PICOTAMIDE MONOHYDRATE CRS&#10;Cisplatin&#10;Glycerol Monostearate 40-55 CRS">{_safe_text(names)}</textarea>
 
-    <button type="submit" class="button secondary">Find Catalogue Numbers</button>
+    <button type="submit" class="button secondary">Find Matching Catalogue Numbers</button>
   </form>
   {table_html}
 </section>
@@ -448,7 +448,7 @@ def landing_page() -> HTMLResponse:
     body = """
 <section class="hero">
   <h1>edqmUSP</h1>
-  <p>Stop hunting through catalogues one position at a time. This deployment gives you a clean landing page, a direct document downloader, and a bulk catalogue finder on the same domain.</p>
+  <p>Stop hunting through catalogues one position at a time. This deployment gives you two focused tools on the same domain: instant document download by catalogue number, and bulk catalogue lookup by product name.</p>
   <div class="grid">
     <section class="card">
       <h2>Download Documents</h2>
@@ -464,6 +464,42 @@ def landing_page() -> HTMLResponse:
 </section>
 """
     return _page("edqmUSP", body, active="home")
+
+
+async def _handle_vercel_entry(request: Request):
+    page = (request.query_params.get("page") or "home").lower()
+    path = request.url.path.rstrip("/")
+
+    if path.endswith("/download"):
+        page = "download"
+    elif path.endswith("/lookup"):
+        page = "lookup"
+    elif path.endswith("/health"):
+        page = "health"
+
+    if page == "health":
+        return PlainTextResponse("ok")
+
+    if request.method == "GET":
+        if page == "download":
+            return download_page()
+        if page == "lookup":
+            return lookup_page()
+        return landing_page()
+
+    form = await request.form()
+    if page == "download":
+        source = str(form.get("source") or "edqm")
+        codes = str(form.get("codes") or "")
+        doc_types = [str(value) for value in form.getlist("doc_types")]
+        return download_documents(source=source, codes=codes, doc_types=doc_types)
+
+    if page == "lookup":
+        source = str(form.get("source") or "both")
+        names = str(form.get("names") or "")
+        return lookup_catalogue_numbers(source=source, names=names)
+
+    return landing_page()
 
 
 @app.get("/download", response_class=HTMLResponse)
@@ -531,3 +567,8 @@ def lookup_catalogue_numbers(
 @app.get("/health", response_class=PlainTextResponse)
 def healthcheck() -> str:
     return "ok"
+
+
+@app.api_route("/api/index.py", methods=["GET", "POST"])
+async def vercel_index_entry(request: Request):
+    return await _handle_vercel_entry(request)

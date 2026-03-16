@@ -2,8 +2,20 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "rewrites": [
     {
-      "source": "/(.*)",
-      "destination": "/api/index.py"
+      "source": "/",
+      "destination": "/api/index.py?page=home"
+    },
+    {
+      "source": "/download",
+      "destination": "/api/index.py?page=download"
+    },
+    {
+      "source": "/lookup",
+      "destination": "/api/index.py?page=lookup"
+    },
+    {
+      "source": "/health",
+      "destination": "/api/index.py?page=health"
     }
   ],
   "functions": {
