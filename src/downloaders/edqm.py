@@ -22,11 +22,6 @@ from urllib3.util.retry import Retry
 from src.config import DOWNLOAD_DIR, EDQM_PASSWORD, EDQM_USERNAME, HEADLESS
 
 try:
-    from curl_cffi import requests as curl_requests
-except Exception:  # pragma: no cover
-    curl_requests = None
-
-try:
     from pypdf import PdfReader
 except Exception:  # pragma: no cover
     PdfReader = None
@@ -402,6 +397,7 @@ class EDQMDownloader:
             "Connection": "keep-alive",
         }
 
+        curl_requests = self._load_curl_requests()
         if curl_requests is not None:
             try:
                 resp = curl_requests.get(
@@ -421,6 +417,14 @@ class EDQMDownloader:
             return resp, ""
         except requests.RequestException as exc:
             return None, str(exc)
+
+    @staticmethod
+    def _load_curl_requests():
+        try:
+            from curl_cffi import requests as curl_requests
+        except Exception:  # pragma: no cover
+            return None
+        return curl_requests
 
     def download_all(self, product_code: str) -> list[DownloadResult]:
         """Download COA, MSDS and COO for an EDQM code."""

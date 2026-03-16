@@ -13,9 +13,6 @@ from tempfile import TemporaryDirectory
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
 
-from src.downloaders.edqm import EDQMDownloader
-from src.downloaders.usp import USPDownloader
-
 app = FastAPI(title="edqmUSP")
 
 APP_CSS = """
@@ -283,7 +280,11 @@ def _resolve_position_name(downloader, code: str) -> str:
 
 
 def _download_batch(source: str, codes: list[str], doc_types: list[str]) -> tuple[bytes, str, int]:
-    downloader_cls = EDQMDownloader if source == "edqm" else USPDownloader
+    if source == "edqm":
+        from src.downloaders.edqm import EDQMDownloader as DownloaderCls
+    else:
+        from src.downloaders.usp import USPDownloader as DownloaderCls
+
     successful_files: dict[str, dict[str, Path]] = {}
     position_names: dict[str, str] = {}
     manifest_lines = [
@@ -294,7 +295,7 @@ def _download_batch(source: str, codes: list[str], doc_types: list[str]) -> tupl
     ]
 
     with TemporaryDirectory() as tmpdir:
-        downloader = downloader_cls(download_dir=Path(tmpdir))
+        downloader = DownloaderCls(download_dir=Path(tmpdir))
         downloader.start()
         try:
             for code in codes:
@@ -328,6 +329,8 @@ def _lookup_catalogue_numbers(source: str, names: list[str], limit: int = 8) -> 
     source = source.lower()
 
     if source in {"edqm", "both"}:
+        from src.downloaders.edqm import EDQMDownloader
+
         with EDQMDownloader() as downloader:
             for query in names:
                 matches = downloader.search_products_by_name(query, limit=limit)
@@ -345,6 +348,8 @@ def _lookup_catalogue_numbers(source: str, names: list[str], limit: int = 8) -> 
                     rows.append({"query": query, "source": "EDQM", "code": "", "name": "No match found"})
 
     if source in {"usp", "both"}:
+        from src.downloaders.usp import USPDownloader
+
         with USPDownloader() as downloader:
             for query in names:
                 matches = downloader.search_products_by_name(query, limit=limit)
