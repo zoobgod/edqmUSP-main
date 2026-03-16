@@ -45,13 +45,19 @@ This app does it in one run:
 - View batch history and downloaded files table.
 - Clear download cache from UI.
 - Optional Yandex Disk upload.
-- Includes optional in-app Flappy-style mini game (`Play V-Bird` button).
 
 ### CLI
 
 - Download from EDQM by one or many catalogue codes.
 - Download from USP by one or many catalogue codes.
 - Upload downloaded files to Yandex Disk.
+
+### Vercel Web App
+
+- Landing page on the root domain.
+- Dedicated downloader page on the same domain.
+- Dedicated bulk catalogue-finder page on the same domain.
+- Built on FastAPI for Vercel deployment, while reusing the same EDQM/USP downloader logic.
 
 ## Requirements
 
@@ -88,6 +94,19 @@ Note:
 ```bash
 streamlit run app.py
 ```
+
+### Vercel Deployment
+
+This repository now includes:
+
+- `api/index.py` - Vercel-compatible FastAPI entrypoint
+- `vercel.json` - root rewrite configuration for same-domain routing
+
+After pushing to Vercel, the main routes are:
+
+- `/`
+- `/download`
+- `/lookup`
 
 ### CLI
 
@@ -131,10 +150,13 @@ Typical outputs:
 ```text
 edqmUSP/
 ├── app.py
+├── vercel.json
 ├── main.py
 ├── requirements.txt
 ├── .env.example
 ├── ydisk_token.txt
+├── api/
+│   └── index.py
 └── src/
     ├── config.py
     ├── downloaders/

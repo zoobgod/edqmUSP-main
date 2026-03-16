@@ -37,6 +37,14 @@ class DownloadResult:
 
 
 @dataclass
+class ProductMatch:
+    query: str
+    product_code: str
+    name: str
+    source: str = "USP"
+
+
+@dataclass
 class LotInfo:
     lot_number: str = ""
     current: bool = False
@@ -195,6 +203,48 @@ class USPDownloader:
             results.append(self.download_document(product_code, doc_type))
 
         return results
+
+    def search_products_by_name(self, query: str, limit: int = 10) -> list[ProductMatch]:
+        session = self._require_session()
+        term = query.strip()
+        if not term:
+            return []
+
+        try:
+            resp = session.get(USP_SEARCH_API, params={"Ntt": term}, timeout=REQUEST_TIMEOUT)
+            resp.raise_for_status()
+            payload = resp.json()
+        except (requests.RequestException, ValueError) as exc:
+            logger.warning("USP name search request failed for %s: %s", term, exc)
+            return []
+
+        records = payload.get("resultsList", {}).get("records", [])
+        matches: list[ProductMatch] = []
+        seen: set[str] = set()
+
+        for group in records:
+            nested = group.get("records") or []
+            for rec in nested:
+                attrs = rec.get("attributes", {})
+                code = self._first_attr_value(
+                    attrs,
+                    "product.repositoryId",
+                    "product.id",
+                    "sku.repositoryId",
+                )
+                name = self._first_attr_value(
+                    attrs,
+                    "product.displayName",
+                    "sku.displayName",
+                )
+                if not code or code in seen:
+                    continue
+                seen.add(code)
+                matches.append(ProductMatch(query=term, product_code=code, name=name or code))
+                if len(matches) >= limit:
+                    return matches
+
+        return matches
 
     def _ensure_current_product(self, product_code: str) -> bool:
         if not self._current_product:
@@ -469,6 +519,14 @@ class USPDownloader:
             seen.add(value)
             unique_values.append(value)
         return unique_values
+
+    @staticmethod
+    def _first_attr_value(attrs: dict, *keys: str) -> str:
+        for key in keys:
+            values = attrs.get(key) or []
+            if values and isinstance(values, list):
+                return str(values[0])
+        return ""
 
     def _require_session(self) -> requests.Session:
         if not self._session:

@@ -57,6 +57,14 @@ class DownloadResult:
 
 
 @dataclass
+class ProductMatch:
+    query: str
+    product_code: str
+    name: str
+    source: str = "EDQM"
+
+
+@dataclass
 class ProductContext:
     code: str
     name: str = ""
@@ -435,6 +443,27 @@ class EDQMDownloader:
 
         return results
 
+    def search_products_by_name(self, query: str, limit: int = 10) -> list[ProductMatch]:
+        session = self._require_session()
+        term = query.strip()
+        if not term:
+            return []
+
+        params = {
+            "vSelectName": "1",  # Name
+            "vContains": "1",    # contains
+            "vtUserName": term,
+        }
+
+        try:
+            resp = session.get(EDQM_SEARCH_URL, params=params, timeout=REQUEST_TIMEOUT)
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            logger.warning("EDQM name search request failed for %s: %s", term, exc)
+            return []
+
+        return self._extract_search_matches(resp.text, term, limit)
+
     def _ensure_current_product(self, product_code: str) -> bool:
         if not self._current:
             return self.search_product(product_code)
@@ -460,6 +489,68 @@ class EDQMDownloader:
         for href, _text in anchors:
             if "/db/4dcgi/view=" in href.lower():
                 return href
+
+        return ""
+
+    def _extract_search_matches(self, html_text: str, query: str, limit: int) -> list[ProductMatch]:
+        matches: list[ProductMatch] = []
+        seen: set[str] = set()
+        compact_query = self._compact(query)
+
+        pattern = re.compile(
+            r'<a[^>]+href=["\']([^"\']*?/db/4DCGI/View=[^"\']+)["\'][^>]*>\s*([^<]+?)\s*</a>',
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        for match in pattern.finditer(html_text):
+            href = html.unescape(match.group(1))
+            code = html.unescape(match.group(2)).strip()
+            if not code or code in seen:
+                continue
+
+            row_text = self._row_text_for_href(html_text, href)
+            name = self._extract_name_from_results_row(row_text, code, compact_query)
+            seen.add(code)
+            matches.append(ProductMatch(query=query, product_code=code, name=name or code))
+            if len(matches) >= limit:
+                break
+
+        return matches
+
+    @staticmethod
+    def _row_text_for_href(html_text: str, href: str) -> str:
+        href_pattern = re.escape(href)
+        row_match = re.search(
+            rf"<tr[^>]*>.*?{href_pattern}.*?</tr>",
+            html_text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if not row_match:
+            return ""
+        raw = re.sub(r"<[^>]+>", " ", row_match.group(0))
+        return html.unescape(re.sub(r"\s+", " ", raw).strip())
+
+    @staticmethod
+    def _extract_name_from_results_row(row_text: str, code: str, compact_query: str) -> str:
+        if not row_text:
+            return ""
+
+        compact_code = re.sub(r"[^A-Z0-9]+", "", code.upper())
+        parts = row_text.split()
+        if compact_code in "".join(parts):
+            lowered = row_text.lower()
+            idx = lowered.find(code.lower())
+            if idx != -1:
+                tail = row_text[idx + len(code):].strip()
+                match = re.match(r"(.+?)\s+\d+\s+[\d.]+\s*(MG|G|ML|MCG|IU|EUR)\b", tail, flags=re.IGNORECASE)
+                if match:
+                    return match.group(1).strip()
+
+        if compact_query:
+            query_words = [word for word in re.split(r"\s+", row_text) if word]
+            for size in range(min(8, len(query_words)), 0, -1):
+                candidate = " ".join(query_words[:size]).strip()
+                if compact_query in re.sub(r"[^a-z0-9]+", "", candidate.lower()):
+                    return candidate
 
         return ""
 
