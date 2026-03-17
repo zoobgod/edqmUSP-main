@@ -133,6 +133,7 @@ body::before {
   font-family: "Fraunces", Georgia, serif;
   font-size: 1.1rem;
   font-weight: 600;
+  color: rgba(232, 241, 255, 0.95);
 }
 .brand-subtitle {
   color: rgba(210, 223, 247, 0.86);
@@ -317,6 +318,7 @@ a {
 }
 .hero-stats {
   margin-top: 10px;
+  grid-template-columns: repeat(3, 1fr);
 }
 .stat {
   padding: 18px;
@@ -377,6 +379,36 @@ a {
   color: var(--ink);
   border: 1px solid var(--line);
   box-shadow: none;
+}
+.scroll-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 16px;
+  border-radius: 999px;
+  border: 1px solid rgba(146, 176, 228, 0.32);
+  background: transparent;
+  color: rgba(232, 241, 255, 0.72);
+  font-size: 0.9rem;
+  font-weight: 600;
+  text-decoration: none;
+  transition: border-color 160ms ease, color 160ms ease, background 160ms ease;
+}
+.scroll-hint:hover {
+  border-color: rgba(146, 176, 228, 0.6);
+  color: rgba(232, 241, 255, 0.95);
+  background: rgba(255, 255, 255, 0.06);
+}
+.hero-shell .stat {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(146, 176, 228, 0.22);
+  box-shadow: none;
+}
+.hero-shell .stat .stat-label {
+  color: rgba(232, 241, 255, 0.55);
+}
+.hero-shell .stat .stat-value {
+  color: rgba(232, 241, 255, 0.92);
 }
 .surface {
   margin-top: 22px;
@@ -611,16 +643,18 @@ pre {
 .task-pill {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 7px 10px;
-  border-radius: 999px;
-  border: 1px solid rgba(146, 176, 228, 0.34);
-  background: rgba(255, 255, 255, 0.08);
-  font-size: 0.82rem;
-  color: rgba(232, 241, 255, 0.95);
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(146, 176, 228, 0.18);
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 0.78rem;
+  color: rgba(232, 241, 255, 0.62);
+  pointer-events: none;
+  user-select: none;
 }
 .task-pill b {
-  color: #9ec8ff;
+  color: rgba(158, 200, 255, 0.8);
 }
 @media (max-width: 700px) {
   .page { padding: 14px 12px 48px; }
@@ -1099,6 +1133,9 @@ def _download_form(
           </div>
         </div>
       </div>
+      <div class="hero-actions" style="margin-top: 10px;">
+        <a class="scroll-hint" href="#download-form">↓ Go to form</a>
+      </div>
     </div>
     <aside class="hero-aside">
       <h3>Quick rules</h3>
@@ -1111,7 +1148,7 @@ def _download_form(
   </div>
 </section>
 
-<section class="surface">
+<section class="surface" id="download-form">
   <div class="form-grid">
     <form method="post" action="/api/index.py?page=download" class="panel">
       <h2>Batch Input</h2>
@@ -1176,8 +1213,8 @@ def _lookup_form(source: str = "both", names: str = "", table_html: str = "", me
         <span class="task-pill"><b>3</b> Copy code column</span>
       </div>
       {note}
-      <div class="hero-actions">
-        <a class="button secondary" href="/download">Open downloader</a>
+      <div class="hero-actions" style="margin-top: 10px;">
+        <a class="scroll-hint" href="#lookup-form">↓ Go to form</a>
       </div>
     </div>
     <aside class="hero-aside">
@@ -1191,7 +1228,7 @@ def _lookup_form(source: str = "both", names: str = "", table_html: str = "", me
   </div>
 </section>
 
-<section class="surface">
+<section class="surface" id="lookup-form">
   <div class="form-grid">
     <form method="post" action="/api/index.py?page=lookup" class="panel">
       <h2>Lookup Input</h2>
@@ -1286,7 +1323,11 @@ def _lookup_results_table(rows: list[dict[str, str]]) -> str:
         "<th>Query</th><th>Source</th><th>Catalogue Number</th><th>Product Name</th>"
         "</tr></thead><tbody>"
         + "".join(body)
-        + "</tbody></table></div></section>"
+        + "</tbody></table></div>"
+        + '<div style="padding: 16px 0 4px; text-align: right;">'
+        + '<a class="button" href="/download">Done? Download your documents \u2192</a>'
+        + "</div>"
+        + "</section>"
     )
 
 
@@ -1296,7 +1337,7 @@ def landing_page() -> HTMLResponse:
 <section class="hero-shell">
   <div class="hero-grid">
     <div class="hero-copy">
-      <span class="eyebrow">edqmUSP</span>
+      <span class="eyebrow">Home</span>
       <h1>Two focused workflows.</h1>
       <p class="lede">Run lookup when you only have names. Run download when you already have catalogue codes.</p>
       <div class="task-strip">
@@ -1304,7 +1345,7 @@ def landing_page() -> HTMLResponse:
         <span class="task-pill"><b>Download</b> Codes -> Documents</span>
       </div>
       <div class="hero-actions">
-        <a class="button" href="/download">Open Downloader</a>
+        <a class="button" href="/download">Download Documents</a>
         <a class="button ghost" href="/lookup">Find Catalogue Numbers</a>
       </div>
       <div class="hero-stats">
@@ -1325,7 +1366,7 @@ def landing_page() -> HTMLResponse:
       </div>
     </div>
     <aside class="hero-aside">
-      <h3>Execution model</h3>
+      <h3>How it works</h3>
       <ul>
         <li>No auth flow for EDQM/USP public endpoints.</li>
         <li>Download step returns one batch ZIP.</li>
@@ -1345,7 +1386,7 @@ def landing_page() -> HTMLResponse:
         <li>Position-level nested ZIP bundles.</li>
         <li>Manifest for missing documents.</li>
       </ul>
-      <a class="button" href="/download">Open Downloader</a>
+      <a class="button" href="/download">Download Documents</a>
     </section>
     <section class="card">
       <h2>Find Catalogue Numbers</h2>
@@ -1355,7 +1396,7 @@ def landing_page() -> HTMLResponse:
         <li>Input cleanup for mixed/noisy strings.</li>
         <li>Copy catalogue column in one click.</li>
       </ul>
-      <a class="button secondary" href="/lookup">Open Catalogue Finder</a>
+      <a class="button" href="/lookup">Find Catalogue Numbers</a>
     </section>
   </div>
 </section>
