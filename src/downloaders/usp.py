@@ -262,6 +262,20 @@ class USPDownloader:
             return self._current_product.display_name or self._current_product.repository_id
         return product_code
 
+    def get_current_batch_number(self, product_code: str) -> str:
+        if not (self._ensure_current_product(product_code) and self._current_product):
+            return ""
+
+        for lot in self._current_product.lots:
+            if lot.current and lot.lot_number:
+                return lot.lot_number
+
+        for lot in self._current_product.lots:
+            if lot.lot_number:
+                return lot.lot_number
+
+        return ""
+
     def _fetch_product(self, product_code: str) -> USPProduct | None:
         session = self._require_session()
         code = product_code.strip()

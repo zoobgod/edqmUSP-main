@@ -482,6 +482,25 @@ class EDQMDownloader:
             return self._current.name or self._current.code
         return product_code
 
+    def get_current_batch_number(self, product_code: str) -> str:
+        if not (self._ensure_current_product(product_code) and self._current):
+            return ""
+
+        fields = self._extract_detail_fields(self._current.detail_html)
+        for key, value in fields.items():
+            if self._compact(key) == "currentbatchnumber" and value:
+                return value.strip()
+
+        match = re.search(
+            r"Current\s+batch\s+number.*?<td[^>]*>\s*<font[^>]*>\s*([^<\s][^<]*)",
+            self._current.detail_html,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if match:
+            return html.unescape(re.sub(r"\s+", " ", match.group(1)).strip())
+
+        return ""
+
     def _extract_detail_href(self, html_text: str, product_code: str) -> str:
         anchors = self._extract_anchors(html_text)
         code_norm = self._compact(product_code)

@@ -665,6 +665,7 @@ def _page(title: str, body: str, active: str = "") -> HTMLResponse:
         ("/", "Home", "home"),
         ("/download", "Download Documents", "download"),
         ("/lookup", "Find Catalogue Numbers", "lookup"),
+        ("/batches", "Current Batch Numbers", "batches"),
     ]
     nav_html = "".join(
         f'<a href="{href}" class="{"active" if key == active else ""}">{label}</a>'
@@ -1060,6 +1061,58 @@ def _lookup_catalogue_numbers(source: str, names: list[str], limit: int = 8) -> 
     return rows
 
 
+def _lookup_current_batches(source: str, codes: list[str]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    source = source.lower()
+
+    if source == "edqm":
+        from src.downloaders.edqm import EDQMDownloader as DownloaderCls
+    else:
+        from src.downloaders.usp import USPDownloader as DownloaderCls
+
+    with TemporaryDirectory() as tmpdir:
+        downloader = DownloaderCls(download_dir=Path(tmpdir))
+        downloader.start()
+        try:
+            for code in codes:
+                if not downloader.search_product(code):
+                    rows.append(
+                        {
+                            "query": code,
+                            "source": source.upper(),
+                            "code": code,
+                            "name": "",
+                            "batch_number": "",
+                            "status": "Product not found",
+                        }
+                    )
+                    continue
+
+                position_name = _resolve_position_name(downloader, code)
+                getter = getattr(downloader, "get_current_batch_number", None)
+                batch_number = ""
+                if callable(getter):
+                    try:
+                        batch_number = (getter(code) or "").strip()
+                    except Exception:
+                        batch_number = ""
+
+                rows.append(
+                    {
+                        "query": code,
+                        "source": source.upper(),
+                        "code": code,
+                        "name": position_name,
+                        "batch_number": batch_number,
+                        "status": "OK" if batch_number else "Batch not found",
+                    }
+                )
+        finally:
+            downloader.stop()
+
+    return rows
+
+
 def _download_form(
     source: str = "edqm",
     codes: str = "",
@@ -1232,6 +1285,78 @@ def _lookup_form(source: str = "both", names: str = "", table_html: str = "", me
 """
 
 
+def _batch_lookup_form(source: str = "edqm", codes: str = "", table_html: str = "", message: str = "") -> str:
+    source = source.lower().strip()
+    note = f'<p class="note">{_safe_text(message)}</p>' if message else ""
+    return f"""
+<section class="hero-shell">
+  <div class="hero-grid">
+    <div class="hero-copy">
+      <span class="eyebrow">Batch Lookup</span>
+      <h1>Get current batch numbers by catalogue code.</h1>
+      <p class="lede">Paste one code per line and return the current EDQM batch number or the current USP lot number.</p>
+      <div class="task-strip">
+        <span class="task-pill"><b>1</b> Select source</span>
+        <span class="task-pill"><b>2</b> Paste codes</span>
+        <span class="task-pill"><b>3</b> Copy batch column</span>
+      </div>
+      {note}
+      <div class="hero-actions">
+        <a class="button secondary" href="/download">Open downloader</a>
+        <a class="button ghost" href="/lookup">Open catalogue finder</a>
+      </div>
+    </div>
+    <aside class="hero-aside">
+      <h3>Batch source</h3>
+      <ul>
+        <li>EDQM: reads the current batch number from the detailed product page.</li>
+        <li>USP: reads the current lot number from the batch table.</li>
+        <li>Returns one result row per input code.</li>
+      </ul>
+    </aside>
+  </div>
+</section>
+
+<section class="surface">
+  <div class="form-grid">
+    <form method="post" action="/api/index.py?page=batches" class="panel">
+      <h2>Batch Input</h2>
+      <p class="muted">Bulk mode for current batch checks.</p>
+
+      <div class="field-group">
+        <label for="source">1) Source</label>
+        <div class="field-hint">Choose one source at a time.</div>
+        <select id="source" name="source">
+          <option value="edqm" {"selected" if source == "edqm" else ""}>EDQM</option>
+          <option value="usp" {"selected" if source == "usp" else ""}>USP</option>
+        </select>
+      </div>
+
+      <div class="field-group">
+        <label for="codes">2) Catalogue numbers</label>
+        <div class="field-hint">Paste one code per line.</div>
+        <textarea id="codes" name="codes" placeholder="I0020000&#10;Y0001532&#10;1335508">{_safe_text(codes)}</textarea>
+      </div>
+
+      <button type="submit" class="secondary">Run Batch Lookup</button>
+    </form>
+
+    <aside class="panel section-stack">
+      <div>
+        <h3>Output</h3>
+        <ul class="mini-list">
+          <li>Copy the whole batch column in one action.</li>
+          <li>Use the table view to review code and product name together.</li>
+          <li>Re-run quickly after editing only the missing lines.</li>
+        </ul>
+      </div>
+    </aside>
+  </div>
+  {table_html}
+</section>
+"""
+
+
 def _lookup_results_table(rows: list[dict[str, str]]) -> str:
     success_count = sum(1 for row in rows if row["code"])
     failed_count = len(rows) - success_count
@@ -1290,6 +1415,67 @@ def _lookup_results_table(rows: list[dict[str, str]]) -> str:
     )
 
 
+def _batch_results_table(rows: list[dict[str, str]]) -> str:
+    found_count = sum(1 for row in rows if row["batch_number"])
+    missing_count = len(rows) - found_count
+    batch_numbers = [row["batch_number"] for row in rows if row["batch_number"]]
+    unique_batches = list(dict.fromkeys(batch_numbers))
+    batch_column = "\n".join(batch_numbers)
+    unique_batch_column = "\n".join(unique_batches)
+    tsv_rows = ["Input\tSource\tCatalogue Number\tProduct Name\tCurrent Batch Number"]
+    body = []
+
+    for row in rows:
+        rendered_batch = row["batch_number"] or row["status"]
+        tsv_rows.append(
+            "\t".join(
+                [
+                    row["query"],
+                    row["source"],
+                    row["code"],
+                    row["name"],
+                    rendered_batch,
+                ]
+            )
+        )
+        klass = "status-ok" if row["batch_number"] else "status-fail"
+        body.append(
+            "<tr>"
+            f"<td>{_safe_text(row['query'])}</td>"
+            f"<td>{_safe_text(row['source'])}</td>"
+            f'<td class="table-code">{_safe_text(row["code"])}</td>'
+            f"<td>{_safe_text(row['name'])}</td>"
+            f'<td class="{klass} table-code">{_safe_text(rendered_batch)}</td>'
+            "</tr>"
+        )
+
+    tsv_text = "\n".join(tsv_rows)
+    return (
+        '<section class="table-panel">'
+        '<div class="table-header">'
+        '<div><h3>Current Batch Results</h3><p class="muted">Copy-ready output for batch release checks.</p></div>'
+        f'<div style="display:flex; gap:10px; flex-wrap:wrap;"><span class="status-pill">{found_count} batches found</span>'
+        f'<span class="status-pill {"fail" if missing_count else ""}">{missing_count} missing</span></div>'
+        "</div>"
+        '<div class="copy-tools">'
+        f'<div class="copy-meta">{len(unique_batches)} unique current batch numbers</div>'
+        '<div class="copy-actions">'
+        '<button type="button" class="button" onclick="copyFromTextarea(\'batch-copy-box\')">Copy Batch Numbers</button>'
+        '<button type="button" class="button secondary" onclick="copyFromTextarea(\'batch-copy-unique\')">Copy Unique Batch Numbers</button>'
+        '<button type="button" class="button secondary" onclick="copyFromTextarea(\'batch-copy-tsv\')">Copy Table TSV</button>'
+        '</div>'
+        f'<textarea id="batch-copy-box" class="copy-box compact" readonly>{_safe_text(batch_column)}</textarea>'
+        f'<textarea id="batch-copy-unique" class="copy-box compact" readonly>{_safe_text(unique_batch_column)}</textarea>'
+        f'<textarea id="batch-copy-tsv" class="copy-box" readonly style="min-height: 180px;">{_safe_text(tsv_text)}</textarea>'
+        '</div>'
+        '<div class="table-wrap"><table><thead><tr>'
+        "<th>Input</th><th>Source</th><th>Catalogue Number</th><th>Product Name</th><th>Current Batch Number</th>"
+        "</tr></thead><tbody>"
+        + "".join(body)
+        + "</tbody></table></div></section>"
+    )
+
+
 @app.get("/", response_class=HTMLResponse)
 def landing_page() -> HTMLResponse:
     body = """
@@ -1297,15 +1483,17 @@ def landing_page() -> HTMLResponse:
   <div class="hero-grid">
     <div class="hero-copy">
       <span class="eyebrow">edqmUSP</span>
-      <h1>Two focused workflows.</h1>
-      <p class="lede">Run lookup when you only have names. Run download when you already have catalogue codes.</p>
+      <h1>Three focused workflows.</h1>
+      <p class="lede">Use lookup for names, download for documents, and batches for current batch numbers.</p>
       <div class="task-strip">
         <span class="task-pill"><b>Lookup</b> Names -> Codes</span>
         <span class="task-pill"><b>Download</b> Codes -> Documents</span>
+        <span class="task-pill"><b>Batches</b> Codes -> Current Batch</span>
       </div>
       <div class="hero-actions">
         <a class="button" href="/download">Open Downloader</a>
         <a class="button ghost" href="/lookup">Find Catalogue Numbers</a>
+        <a class="button secondary" href="/batches">Open Batch Lookup</a>
       </div>
       <div class="hero-stats">
         <div class="grid">
@@ -1321,6 +1509,10 @@ def landing_page() -> HTMLResponse:
             <span class="stat-value">Copy-ready output</span>
             <span class="stat-label">Column copy and TSV copy for fast handoff</span>
           </div>
+          <div class="stat">
+            <span class="stat-value">Current batches</span>
+            <span class="stat-label">EDQM batch and USP current lot lookup</span>
+          </div>
         </div>
       </div>
     </div>
@@ -1330,6 +1522,7 @@ def landing_page() -> HTMLResponse:
         <li>No auth flow for EDQM/USP public endpoints.</li>
         <li>Download step returns one batch ZIP.</li>
         <li>Lookup step tolerates noisy input lines.</li>
+        <li>Batch step returns the current EDQM or USP batch value.</li>
       </ul>
     </aside>
   </div>
@@ -1357,6 +1550,16 @@ def landing_page() -> HTMLResponse:
       </ul>
       <a class="button secondary" href="/lookup">Open Catalogue Finder</a>
     </section>
+    <section class="card">
+      <h2>Current Batch Numbers</h2>
+      <p class="muted">Use when you already have catalogue numbers and need the current batch.</p>
+      <ul class="feature-list" style="display:grid; gap:10px; margin:16px 0 18px;">
+        <li>One line per code.</li>
+        <li>EDQM and USP supported.</li>
+        <li>Copy-ready batch number column.</li>
+      </ul>
+      <a class="button ghost" href="/batches">Open Batch Lookup</a>
+    </section>
   </div>
 </section>
 """
@@ -1371,6 +1574,8 @@ async def _handle_vercel_entry(request: Request):
         page = "download"
     elif path.endswith("/lookup"):
         page = "lookup"
+    elif path.endswith("/batches"):
+        page = "batches"
     elif path.endswith("/health"):
         page = "health"
 
@@ -1382,6 +1587,8 @@ async def _handle_vercel_entry(request: Request):
             return download_page()
         if page == "lookup":
             return lookup_page()
+        if page == "batches":
+            return batch_lookup_page()
         return landing_page()
 
     raw_body = await request.body()
@@ -1404,6 +1611,11 @@ async def _handle_vercel_entry(request: Request):
         source = form_first("source", "both")
         names = form_first("names", "")
         return lookup_catalogue_numbers(source=source, names=names)
+
+    if page == "batches":
+        source = form_first("source", "edqm")
+        codes = form_first("codes", "")
+        return current_batch_lookup(source=source, codes=codes)
 
     return landing_page()
 
@@ -1505,6 +1717,50 @@ def lookup_catalogue_numbers(
         "Find Catalogue Numbers",
         _lookup_form(source=source, names=names, table_html=table_html),
         active="lookup",
+    )
+
+
+@app.get("/batches", response_class=HTMLResponse)
+def batch_lookup_page() -> HTMLResponse:
+    return _page("Current Batch Numbers", _batch_lookup_form(), active="batches")
+
+
+@app.post("/batches", response_class=HTMLResponse)
+def current_batch_lookup(
+    source: str = Form("edqm"),
+    codes: str = Form(""),
+):
+    source = source.lower().strip()
+    clean_codes = _parse_lines(codes)
+
+    if source not in {"edqm", "usp"}:
+        return _page(
+            "Current Batch Numbers",
+            _batch_lookup_form(source="edqm", codes=codes, message="Invalid source."),
+            active="batches",
+        )
+
+    if not clean_codes:
+        return _page(
+            "Current Batch Numbers",
+            _batch_lookup_form(source=source, codes=codes, message="Enter at least one catalogue number."),
+            active="batches",
+        )
+
+    try:
+        rows = _lookup_current_batches(source, clean_codes)
+    except Exception as exc:
+        return _page(
+            "Current Batch Numbers",
+            _batch_lookup_form(source=source, codes=codes, message=f"Batch lookup failed: {exc}"),
+            active="batches",
+        )
+
+    table_html = _batch_results_table(rows)
+    return _page(
+        "Current Batch Numbers",
+        _batch_lookup_form(source=source, codes=codes, table_html=table_html),
+        active="batches",
     )
 
 

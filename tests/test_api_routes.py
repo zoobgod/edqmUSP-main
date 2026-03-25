@@ -46,6 +46,30 @@ class ApiRouteTests(unittest.TestCase):
         self.assertIn("attachment;", resp.headers.get("content-disposition", ""))
         self.assertEqual(resp.content, fake_zip)
 
+    def test_batch_lookup_post_renders_results(self):
+        fake_rows = [
+            {
+                "query": "I0020000",
+                "source": "EDQM",
+                "code": "I0020000",
+                "name": "IBUPROFEN CRS",
+                "batch_number": "6",
+                "status": "OK",
+            }
+        ]
+
+        with patch("api.index._lookup_current_batches", return_value=fake_rows):
+            resp = self.client.post(
+                "/api/index.py?page=batches",
+                data={"source": "edqm", "codes": "I0020000"},
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("Current Batch Results", resp.text)
+        self.assertIn("Copy Batch Numbers", resp.text)
+        self.assertIn("IBUPROFEN CRS", resp.text)
+        self.assertIn("6", resp.text)
+
 
 if __name__ == "__main__":
     unittest.main()
