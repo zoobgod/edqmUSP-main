@@ -13,7 +13,7 @@ from tempfile import TemporaryDirectory
 from urllib.parse import parse_qs
 
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, Response, StreamingResponse
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 try:  # Prefer normal import resolution; only patch sys.path if the runtime needs it.
@@ -570,6 +570,92 @@ tbody tr:hover td {
   border: 1px solid rgba(166, 106, 43, 0.18);
   background: rgba(201, 139, 60, 0.10);
 }
+.result-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 18px;
+}
+.timeline-grid {
+  display: grid;
+  gap: 16px;
+}
+.timeline-card {
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(255,255,255,0.84);
+  box-shadow: var(--shadow-soft);
+  padding: 18px;
+}
+.timeline-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.timeline-card-meta {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.step-list.inline {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.step-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(17, 32, 57, 0.05);
+  font-size: 0.92rem;
+}
+.step-pill.ok {
+  border-color: rgba(31, 88, 195, 0.18);
+  background: rgba(45, 124, 255, 0.1);
+  color: #163c8c;
+}
+.step-pill.fail {
+  border-color: rgba(209, 73, 91, 0.22);
+  background: rgba(209, 73, 91, 0.08);
+  color: #96273a;
+}
+.step-pill.neutral {
+  color: var(--muted);
+}
+.notes-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+}
+.note-item {
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: rgba(17, 32, 57, 0.04);
+}
+.doc-status {
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+.doc-status.ok {
+  color: #163c8c;
+}
+.doc-status.fail {
+  color: #96273a;
+}
+.wrap-cell {
+  white-space: normal;
+  min-width: 180px;
+}
 .manifest-panel {
   margin-top: 22px;
   padding: 18px;
@@ -935,10 +1021,12 @@ def _build_batch_zip(
         for code, files_by_doc in successful_files.items():
             position_name = position_names.get(code, code)
             bundle_name = _bundle_name(source, code, position_name)
-            archive.writestr(
-                f"{_safe_filename(bundle_name)}.zip",
-                _build_position_zip(bundle_name, files_by_doc),
-            )
+            folder_name = _safe_filename(bundle_name)
+            for doc_type in ("COA", "MSDS", "COO"):
+                file_path = files_by_doc.get(doc_type)
+                if not file_path or not file_path.exists():
+                    continue
+                archive.writestr(f"{folder_name}/{_zip_member_name(bundle_name, doc_type, file_path)}", file_path.read_bytes())
         archive.writestr("manifest.txt", manifest_text)
     buffer.seek(0)
     return buffer.getvalue()
@@ -968,7 +1056,132 @@ def _resolve_position_name(downloader, code: str) -> str:
     return code
 
 
-def _download_batch(source: str, codes: list[str], doc_types: list[str]) -> tuple[bytes, str, int]:
+def _doc_status(result) -> str:
+    return "OK" if getattr(result, "success", False) else "Fail"
+
+
+def _edqm_detail_summary(downloader) -> dict[str, str]:
+    current = getattr(downloader, "_current", None)
+    extractor = getattr(downloader, "_extract_detail_fields", None)
+    if not current or not callable(extractor):
+        return {}
+    try:
+        fields = extractor(current.detail_html)
+    except Exception:
+        return {}
+    return {
+        "name": fields.get("Name") or current.name or current.code,
+        "current_batch": fields.get("Current batch number", ""),
+        "price": fields.get("Price", ""),
+        "availability": fields.get("Availability", ""),
+        "storage": fields.get("EDQM long term storage conditions", ""),
+    }
+
+
+def _usp_search_summary(downloader, code: str) -> dict[str, str]:
+    try:
+        from src.downloaders.usp import REQUEST_TIMEOUT, USP_SEARCH_API
+    except Exception:
+        return {}
+
+    require_session = getattr(downloader, "_require_session", None)
+    compact = getattr(downloader, "_compact", None)
+    if not callable(require_session) or not callable(compact):
+        return {}
+
+    try:
+        session = require_session()
+        resp = session.get(USP_SEARCH_API, params={"Ntt": code}, timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception:
+        return {}
+
+    requested = compact(code)
+    records = payload.get("resultsList", {}).get("records", [])
+    for group in records:
+        for rec in group.get("records") or []:
+            attrs = rec.get("attributes", {})
+            candidate = ((attrs.get("product.repositoryId") or attrs.get("product.id") or [""])[0] or "").strip()
+            if candidate and compact(candidate) != requested:
+                continue
+            return {
+                "price": ((attrs.get("product.listPrice") or [""])[0] or "").strip(),
+                "in_stock": ((attrs.get("USPProductType.usp_in_stock") or [""])[0] or "").strip(),
+                "orderable": ((attrs.get("USPProductType.usp_is_orderable") or [""])[0] or "").strip(),
+                "ready_to_ship": ((attrs.get("USPProductType.usp_ready_to_ship") or [""])[0] or "").strip(),
+                "packing_size": ((attrs.get("USPProductType.usp_packing_size") or [""])[0] or "").strip(),
+                "uom": ((attrs.get("USPProductType.usp_uom") or [""])[0] or "").strip(),
+                "cas": ((attrs.get("USPProductType.usp_cas_number") or [""])[0] or "").strip(),
+                "molecular_formula": ((attrs.get("USPProductType.usp_molecular_formula") or [""])[0] or "").strip(),
+                "current_lot": ((attrs.get("USPProductType.usp_current_lot_number") or [""])[0] or "").strip(),
+                "category_type": ((attrs.get("USPProductType.usp_product_category_type") or [""])[0] or "").strip(),
+            }
+    return {}
+
+
+def _format_lot_history(lots: list) -> str:
+    parts: list[str] = []
+    for lot in lots:
+        lot_number = getattr(lot, "lot_number", "")
+        if not lot_number:
+            continue
+        labels = []
+        if getattr(lot, "current", False):
+            labels.append("current")
+        valid_use_date = getattr(lot, "valid_use_date", "")
+        if valid_use_date:
+            labels.append(valid_use_date)
+        parts.append(f"{lot_number} ({', '.join(labels)})" if labels else lot_number)
+    return "; ".join(parts)
+
+
+def _usp_product_summary(downloader) -> dict[str, str]:
+    product = getattr(downloader, "_current_product", None)
+    if not product:
+        return {}
+
+    current_lot = ""
+    current_country = ""
+    current_material_origin = ""
+    for lot in product.lots:
+        if getattr(lot, "current", False):
+            current_lot = getattr(lot, "lot_number", "")
+            current_country = getattr(lot, "origin_country", "")
+            current_material_origin = getattr(lot, "material_origin", "")
+            break
+
+    if not current_country and product.lots:
+        current_country = getattr(product.lots[0], "origin_country", "")
+    if not current_material_origin and product.lots:
+        current_material_origin = getattr(product.lots[0], "material_origin", "")
+
+    search_summary = _usp_search_summary(downloader, product.repository_id)
+
+    return {
+        "name": product.display_name or product.repository_id,
+        "country_of_origin": current_country or product.country_of_origin,
+        "current_lot": current_lot or search_summary.get("current_lot", ""),
+        "lot_history": _format_lot_history(product.lots),
+        "material_origin": current_material_origin,
+        "category_type": search_summary.get("category_type", product.category_type),
+        "sds_availability": "Yes" if product.display_sds_link else "No",
+        "price": search_summary.get("price", ""),
+        "in_stock": search_summary.get("in_stock", ""),
+        "orderable": search_summary.get("orderable", ""),
+        "packing_size": search_summary.get("packing_size", ""),
+        "uom": search_summary.get("uom", ""),
+        "cas": search_summary.get("cas", ""),
+        "molecular_formula": search_summary.get("molecular_formula", ""),
+    }
+
+
+def _storage_suffix(summary: dict[str, str]) -> str:
+    storage = (summary.get("storage") or "").strip()
+    return f" ({storage})" if storage else ""
+
+
+def _download_batch(source: str, codes: list[str], doc_types: list[str]) -> dict[str, object]:
     if source == "edqm":
         from src.downloaders.edqm import EDQMDownloader as DownloaderCls
     else:
@@ -976,12 +1189,13 @@ def _download_batch(source: str, codes: list[str], doc_types: list[str]) -> tupl
 
     successful_files: dict[str, dict[str, Path]] = {}
     position_names: dict[str, str] = {}
-    manifest_lines = [
+    manifest_lines: list[str] = [
         f"Batch generated: {datetime.utcnow().isoformat()}Z",
         f"Source: {source.upper()}",
         f"Requested document types: {', '.join(doc_types)}",
         "",
     ]
+    rows: list[dict[str, object]] = []
 
     with TemporaryDirectory() as tmpdir:
         downloader = DownloaderCls(download_dir=Path(tmpdir))
@@ -989,28 +1203,80 @@ def _download_batch(source: str, codes: list[str], doc_types: list[str]) -> tupl
         try:
             for code in codes:
                 manifest_lines.append(f"[{code}]")
+                row: dict[str, object] = {
+                    "code": code,
+                    "source": source.upper(),
+                    "name": "",
+                    "summary": {},
+                    "doc_results": {},
+                    "notes": [],
+                    "timeline": [],
+                }
+                row["timeline"] = [{"label": "Search", "status": "fail"}]
                 if downloader.search_product(code):
-                    position_names[code] = _resolve_position_name(downloader, code)
+                    summary = _edqm_detail_summary(downloader) if source == "edqm" else _usp_product_summary(downloader)
+                    position_name = _resolve_position_name(downloader, code)
+                    if summary.get("name"):
+                        position_name = str(summary["name"])
+                    row["name"] = position_name
+                    row["summary"] = summary
+                    position_names[code] = position_name + _storage_suffix(summary)
+                    timeline = [
+                        {"label": "Search", "status": "ok"},
+                        {"label": "Metadata", "status": "ok"},
+                    ]
+                    doc_results: dict[str, dict[str, str]] = {}
+                    files_downloaded = 0
+                    notes: list[str] = []
                     for doc in doc_types:
                         result = downloader.download_document(code, doc)
+                        status = _doc_status(result)
+                        doc_entry = {
+                            "status": status,
+                            "file_name": Path(result.file_path).name if result.success and result.file_path else "",
+                            "error": result.error or "",
+                        }
+                        doc_results[doc] = doc_entry
+                        timeline.append({"label": doc, "status": "ok" if result.success else "fail"})
                         if result.success:
                             file_path = Path(result.file_path)
                             successful_files.setdefault(code, {})[doc] = file_path
                             manifest_lines.append(f"  {doc}: OK -> {file_path.name}")
+                            files_downloaded += 1
+                            if doc == "MSDS" and "sigma" in file_path.name.lower():
+                                notes.append("Sigma fallback used for MSDS.")
                         else:
                             manifest_lines.append(f"  {doc}: FAIL -> {result.error}")
+                            notes.append(f"{doc}: {result.error or 'Download failed'}")
+                    timeline.append({"label": "Package", "status": "ok" if files_downloaded else "fail"})
+                    row["doc_results"] = doc_results
+                    row["timeline"] = timeline
+                    row["notes"] = notes or (["All requested documents downloaded."] if files_downloaded == len(doc_types) else [])
                 else:
+                    row["notes"] = ["Product not found. Manual check required."]
+                    row["doc_results"] = {
+                        doc: {"status": "Fail", "file_name": "", "error": "Product not found"}
+                        for doc in doc_types
+                    }
+                    row["timeline"] = [{"label": "Search", "status": "fail"}] + [
+                        {"label": doc, "status": "fail"} for doc in doc_types
+                    ]
                     for doc in doc_types:
                         manifest_lines.append(f"  {doc}: FAIL -> Product not found")
                 manifest_lines.append("")
+                rows.append(row)
         finally:
             downloader.stop()
 
         manifest_text = "\n".join(manifest_lines)
-        if not successful_files:
-            return b"", manifest_text, 0
-        batch_zip = _build_batch_zip(source, successful_files, position_names, manifest_text)
-        return batch_zip, manifest_text, len(successful_files)
+        batch_zip = _build_batch_zip(source, successful_files, position_names, manifest_text) if successful_files else b""
+        return {
+            "zip_bytes": batch_zip,
+            "manifest_text": manifest_text,
+            "position_count": len(successful_files),
+            "rows": rows,
+            "position_names": position_names,
+        }
 
 
 def _lookup_catalogue_numbers(source: str, names: list[str], limit: int = 8) -> list[dict[str, str]]:
@@ -1118,6 +1384,7 @@ def _download_form(
     codes: str = "",
     message: str = "",
     selected_docs: list[str] | None = None,
+    results_html: str = "",
 ) -> str:
     source = source.lower()
     active_docs = {doc.upper() for doc in (selected_docs or ["COA", "MSDS", "COO"])}
@@ -1143,8 +1410,8 @@ def _download_form(
             <span class="stat-label">Select any combination</span>
           </div>
           <div class="stat">
-            <span class="stat-value">Nested ZIP</span>
-            <span class="stat-label">One position ZIP per code</span>
+            <span class="stat-value">One batch ZIP</span>
+            <span class="stat-label">Folders grouped by position inside the ZIP</span>
           </div>
           <div class="stat">
             <span class="stat-value">Manifest included</span>
@@ -1196,7 +1463,7 @@ def _download_form(
       </div>
 
       <button type="submit">Generate ZIP</button>
-      <div class="microcopy" style="margin-top: 12px;">The download starts immediately after processing.</div>
+      <div class="microcopy" style="margin-top: 12px;">After processing you will get one ZIP, a per-code timeline, summary table, and attention notes.</div>
     </form>
 
     <aside class="panel section-stack">
@@ -1210,8 +1477,142 @@ def _download_form(
       </div>
     </aside>
   </div>
+  {results_html}
 </section>
 """
+
+
+def _render_download_timeline(rows: list[dict[str, object]]) -> str:
+    cards: list[str] = []
+    for row in rows:
+        code = str(row.get("code", ""))
+        name = str(row.get("name", ""))
+        steps = []
+        for step in row.get("timeline", []):
+            label = _safe_text(str(step.get("label", "")))
+            status = str(step.get("status", "neutral"))
+            css = "ok" if status == "ok" else "fail" if status == "fail" else "neutral"
+            text = "OK" if status == "ok" else "Fail" if status == "fail" else "Pending"
+            steps.append(f'<span class="step-pill {css}"><b>{label}</b> {text}</span>')
+
+        notes = "".join(
+            f'<div class="note-item">{_safe_text(str(note))}</div>'
+            for note in row.get("notes", [])
+        )
+        cards.append(
+            '<article class="timeline-card">'
+            '<div class="timeline-card-header">'
+            f'<div><h3>{_safe_text(code)}</h3><p class="muted">{_safe_text(name or "No product resolved")}</p></div>'
+            f'<div class="timeline-card-meta"><span class="status-pill">{_safe_text(str(row.get("source", "")))}</span></div>'
+            '</div>'
+            f'<div class="step-list inline">{"".join(steps)}</div>'
+            + (f'<div class="notes-list">{notes}</div>' if notes else "")
+            + '</article>'
+        )
+
+    return (
+        '<section class="table-panel">'
+        '<div class="table-header"><div><h3>Per-Code Status Timeline</h3><p class="muted">Each code shows search, metadata, document download, and packaging status.</p></div></div>'
+        f'<div class="timeline-grid">{"".join(cards)}</div>'
+        '</section>'
+    )
+
+
+def _render_download_summary_table(source: str, rows: list[dict[str, object]], doc_types: list[str]) -> str:
+    if source == "usp":
+        headers = [
+            "Code", "Product Name", "Country of Origin", "Current Lot", "Lot History",
+            "Material Origin", "Category Type", "SDS Availability", "Price", "In Stock",
+            "Orderable", "Packing Size", "UOM", "CAS", "Molecular Formula",
+        ]
+        accessors = [
+            ("code", False),
+            ("name", False),
+            ("country_of_origin", False),
+            ("current_lot", False),
+            ("lot_history", True),
+            ("material_origin", False),
+            ("category_type", False),
+            ("sds_availability", False),
+            ("price", False),
+            ("in_stock", False),
+            ("orderable", False),
+            ("packing_size", False),
+            ("uom", False),
+            ("cas", False),
+            ("molecular_formula", False),
+        ]
+    else:
+        headers = ["Code", "Product Name", "Current Batch", "Price", "Availability", "Storage"]
+        accessors = [
+            ("code", False),
+            ("name", False),
+            ("current_batch", False),
+            ("price", False),
+            ("availability", False),
+            ("storage", False),
+        ]
+
+    headers += doc_types + ["Notes"]
+    body: list[str] = []
+    for row in rows:
+        summary = row.get("summary", {}) if isinstance(row.get("summary", {}), dict) else {}
+        doc_results = row.get("doc_results", {}) if isinstance(row.get("doc_results", {}), dict) else {}
+        notes = " | ".join(str(note) for note in row.get("notes", []))
+        cells: list[str] = []
+        for key, wrap in accessors:
+            value = row.get(key) if key in {"code", "name"} else summary.get(key, "")
+            css = "wrap-cell" if wrap else ""
+            cells.append(f'<td class="{css}">{_safe_text(str(value or "—"))}</td>')
+        for doc in doc_types:
+            doc_info = doc_results.get(doc, {}) if isinstance(doc_results.get(doc, {}), dict) else {}
+            status = str(doc_info.get("status", "—"))
+            css = "ok" if status == "OK" else "fail"
+            cells.append(f'<td class="doc-status {css}">{_safe_text(status)}</td>')
+        cells.append(f'<td class="wrap-cell">{_safe_text(notes or "—")}</td>')
+        body.append("<tr>" + "".join(cells) + "</tr>")
+
+    header_html = "".join(f"<th>{_safe_text(label)}</th>" for label in headers)
+    return (
+        '<section class="table-panel">'
+        '<div class="table-header"><div><h3>Download Summary</h3><p class="muted">Metadata parsed from the source page plus document outcomes for each code.</p></div></div>'
+        f'<div class="table-wrap"><table><thead><tr>{header_html}</tr></thead><tbody>{"".join(body)}</tbody></table></div>'
+        '</section>'
+    )
+
+
+def _render_download_results(
+    source: str,
+    codes: list[str],
+    rows: list[dict[str, object]],
+    doc_types: list[str],
+    manifest_text: str,
+    position_count: int = 0,
+) -> str:
+    hidden_fields = [f'<input type="hidden" name="source" value="{_safe_text(source)}">']
+    hidden_fields.append(f'<input type="hidden" name="codes" value="{_safe_text(chr(10).join(codes))}">')
+    hidden_fields.extend(
+        f'<input type="hidden" name="doc_types" value="{_safe_text(doc)}">' for doc in doc_types
+    )
+    action_html = (
+        '<form method="post" action="/api/index.py?page=download-file" target="_blank" style="margin:0;">'
+        + "".join(hidden_fields)
+        + '<button type="submit">Download Batch ZIP</button>'
+        + '</form>'
+        if position_count
+        else '<span class="button secondary" aria-disabled="true">No ZIP Available</span>'
+    )
+    return (
+        '<section class="table-panel">'
+        '<div class="result-actions">'
+        '<div><h3>Batch Result</h3><p class="muted">One ZIP at the top level. Each position is a folder inside the archive.</p></div>'
+        f'<div style="display:flex; gap:10px; flex-wrap:wrap;">{action_html}<span class="status-pill">{position_count} positions packaged</span></div>'
+        '</div>'
+        '</section>'
+        + _render_download_timeline(rows)
+        + _render_download_summary_table(source, rows, doc_types)
+        + f'<section class="manifest-panel"><h3>Batch Manifest</h3><pre>{_safe_text(manifest_text)}</pre></section>'
+    )
 
 
 def _lookup_form(source: str = "both", names: str = "", table_html: str = "", message: str = "") -> str:
@@ -1535,7 +1936,7 @@ def landing_page() -> HTMLResponse:
       <p class="muted">Use when you already have catalogue numbers.</p>
       <ul class="feature-list" style="display:grid; gap:10px; margin:16px 0 18px;">
         <li>Choose COA, MSDS, COO.</li>
-        <li>Position-level nested ZIP bundles.</li>
+        <li>One batch ZIP with one folder per position.</li>
         <li>Manifest for missing documents.</li>
       </ul>
       <a class="button" href="/download">Open Downloader</a>
@@ -1607,6 +2008,12 @@ async def _handle_vercel_entry(request: Request):
         doc_types = [str(value) for value in form_list("doc_types")]
         return download_documents(source=source, codes=codes, doc_types=doc_types)
 
+    if page == "download-file":
+        source = form_first("source", "edqm")
+        codes = form_first("codes", "")
+        doc_types = [str(value) for value in form_list("doc_types")]
+        return download_documents_file(source=source, codes=codes, doc_types=doc_types)
+
     if page == "lookup":
         source = form_first("source", "both")
         names = form_first("names", "")
@@ -1655,7 +2062,7 @@ def download_documents(
         )
 
     try:
-        batch_zip, manifest_text, position_count = _download_batch(source, clean_codes, clean_doc_types)
+        batch_result = _download_batch(source, clean_codes, clean_doc_types)
     except Exception as exc:
         body = _download_form(
             source=source,
@@ -1665,21 +2072,52 @@ def download_documents(
         )
         return _page("Download Documents", body, active="download")
 
-    if not batch_zip:
-        body = (
-            _download_form(
-                source=source,
-                codes=codes,
-                message="No files were downloaded. See manifest below.",
-                selected_docs=clean_doc_types,
-            )
-            + f'<section class="manifest-panel"><h3>Batch Manifest</h3><pre>{_safe_text(manifest_text)}</pre></section>'
-        )
-        return _page("Download Documents", body, active="download")
+    manifest_text = str(batch_result.get("manifest_text", ""))
+    position_count = int(batch_result.get("position_count", 0))
+    rows = list(batch_result.get("rows", []))
+    message = "Download complete. Review the summary and use the ZIP button at the top." if position_count else "No files were downloaded. Review the summary and manifest below."
+
+    results_html = _render_download_results(
+        source=source,
+        codes=clean_codes,
+        rows=rows,
+        doc_types=clean_doc_types,
+        manifest_text=manifest_text,
+        position_count=position_count,
+    )
+    return _page(
+        "Download Documents",
+        _download_form(
+            source=source,
+            codes=codes,
+            message=message,
+            selected_docs=clean_doc_types,
+            results_html=results_html,
+        ),
+        active="download",
+    )
+
+
+def download_documents_file(
+    source: str = Form(...),
+    codes: str = Form(""),
+    doc_types: list[str] = Form(default_factory=list),
+):
+    source = source.lower().strip()
+    clean_codes = _parse_lines(codes)
+    clean_doc_types = [doc.upper() for doc in doc_types if doc.upper() in {"COA", "MSDS", "COO"}]
+    if source not in {"edqm", "usp"} or not clean_codes or not clean_doc_types:
+        return Response("Invalid download request.", status_code=400, media_type="text/plain")
+
+    batch_result = _download_batch(source, clean_codes, clean_doc_types)
+    zip_bytes = bytes(batch_result.get("zip_bytes", b""))
+    position_count = int(batch_result.get("position_count", 0))
+    if not zip_bytes:
+        return Response("No files available for ZIP download.", status_code=404, media_type="text/plain")
 
     filename = f"{source.upper()}_BATCH_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{position_count}pos.zip"
     return StreamingResponse(
-        BytesIO(batch_zip),
+        BytesIO(zip_bytes),
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

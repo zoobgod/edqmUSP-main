@@ -110,7 +110,7 @@ def _download_documents(source: str, codes: list[str], doc_types: list[str], bas
                 st.markdown("### Download to your PC")
                 batch_zip_data = _build_batch_zip(source, successful_files, position_names)
                 st.download_button(
-                    label="Download All (Nested ZIP)",
+                    label="Download All ZIP",
                     data=batch_zip_data,
                     file_name=f"{_safe_file_part(source.upper())}_BATCH_{batch_id}.zip",
                     mime="application/zip",

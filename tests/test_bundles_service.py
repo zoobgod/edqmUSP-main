@@ -40,7 +40,7 @@ class BundlesServiceTests(unittest.TestCase):
             self.assertTrue(any(name.endswith("_COA.pdf") for name in names))
             self.assertTrue(any(name.endswith("_MSDS.pdf") for name in names))
 
-    def test_build_batch_zip_writes_nested_zips_and_manifest(self):
+    def test_build_batch_zip_writes_position_folders_and_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             coa = root / "coa.pdf"
@@ -55,12 +55,8 @@ class BundlesServiceTests(unittest.TestCase):
             with zipfile.ZipFile(io.BytesIO(payload), "r") as zf:
                 names = sorted(zf.namelist())
                 self.assertIn("manifest.txt", names)
-                nested_name = next(name for name in names if name.endswith(".zip"))
-                nested_bytes = zf.read(nested_name)
-
-            with zipfile.ZipFile(io.BytesIO(nested_bytes), "r") as nested:
-                nested_names = nested.namelist()
-                self.assertIn("France.txt", nested_names)
+                self.assertTrue(any(name.endswith("/France.txt") for name in names))
+                self.assertTrue(any("/" in name and name.endswith("_COA.pdf") for name in names))
 
 
 if __name__ == "__main__":

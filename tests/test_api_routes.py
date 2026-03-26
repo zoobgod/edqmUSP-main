@@ -31,20 +31,63 @@ class ApiRouteTests(unittest.TestCase):
         self.assertIn("Y0001949", resp.text)
         self.assertIn("Copy Catalogue Numbers", resp.text)
 
-    def test_download_post_returns_zip(self):
-        fake_zip = b"PK\x03\x04demo"
-        fake_manifest = "Batch generated: demo"
+    def test_download_post_renders_summary_page(self):
+        fake_result = {
+            "zip_bytes": b"PK\x03\x04demo",
+            "manifest_text": "Batch generated: demo",
+            "position_count": 1,
+            "rows": [
+                {
+                    "code": "G0400006",
+                    "source": "EDQM",
+                    "name": "GLYCEROL MONOSTEARATE 40-55 CRS",
+                    "summary": {
+                        "name": "GLYCEROL MONOSTEARATE 40-55 CRS",
+                        "current_batch": "4",
+                        "price": "90 EUR",
+                        "availability": "Available",
+                        "storage": "+5°C+/-3°C",
+                    },
+                    "doc_results": {
+                        "COA": {"status": "OK", "file_name": "coa.pdf", "error": ""},
+                        "COO": {"status": "OK", "file_name": "France.pdf", "error": ""},
+                    },
+                    "notes": ["All requested documents downloaded."],
+                    "timeline": [{"label": "Search", "status": "ok"}],
+                }
+            ],
+        }
 
-        with patch("api.index._download_batch", return_value=(fake_zip, fake_manifest, 1)):
+        with patch("api.index._download_batch", return_value=fake_result):
             resp = self.client.post(
                 "/api/index.py?page=download",
                 data={"source": "edqm", "codes": "G0400006", "doc_types": ["COA", "COO"]},
             )
 
         self.assertEqual(resp.status_code, 200)
+        self.assertIn("Download Batch ZIP", resp.text)
+        self.assertIn("Per-Code Status Timeline", resp.text)
+        self.assertIn("Download Summary", resp.text)
+        self.assertIn("G0400006", resp.text)
+        self.assertIn("page=download-file", resp.text)
+
+    def test_download_file_route_returns_zip(self):
+        fake_result = {
+            "zip_bytes": b"PK\x03\x04demo",
+            "manifest_text": "Batch generated: demo",
+            "position_count": 1,
+            "rows": [],
+        }
+        with patch("api.index._download_batch", return_value=fake_result):
+            resp = self.client.post(
+                "/api/index.py?page=download-file",
+                data={"source": "edqm", "codes": "G0400006", "doc_types": ["COA", "COO"]},
+            )
+
+        self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.headers.get("content-type"), "application/zip")
         self.assertIn("attachment;", resp.headers.get("content-disposition", ""))
-        self.assertEqual(resp.content, fake_zip)
+        self.assertEqual(resp.content, b"PK\x03\x04demo")
 
     def test_batch_lookup_post_renders_results(self):
         fake_rows = [

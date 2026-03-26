@@ -58,13 +58,18 @@ def build_batch_zip(
     position_names: dict[str, str],
     manifest_text: str | None = None,
 ) -> bytes:
-    """Build nested ZIP: one per position; optional manifest at root."""
+    """Build one batch ZIP with one folder per position; optional manifest at root."""
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for code, files_by_doc in successful_files.items():
             position = position_names.get(code, code)
             bundle = bundle_name(source, code, position)
-            archive.writestr(f"{safe_file_part(bundle)}.zip", build_position_zip(bundle, files_by_doc))
+            folder = safe_file_part(bundle)
+            for doc_type in ("COA", "MSDS", "COO"):
+                file_path = files_by_doc.get(doc_type)
+                if not file_path or not file_path.exists():
+                    continue
+                archive.writestr(f"{folder}/{zip_member_name(bundle, doc_type, file_path)}", file_path.read_bytes())
 
         if manifest_text:
             archive.writestr("manifest.txt", manifest_text)
