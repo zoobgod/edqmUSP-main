@@ -841,8 +841,8 @@ class EDQMDownloader:
         if not code_norm:
             return ""
 
-        for raw_line in text.splitlines():
-            line = re.sub(r"\s+", " ", raw_line).strip()
+        lines = [re.sub(r"\s+", " ", raw).strip() for raw in text.splitlines()]
+        for idx, line in enumerate(lines):
             if not line:
                 continue
             if code_norm not in self._compact(line):
@@ -851,6 +851,21 @@ class EDQMDownloader:
             candidate = self._country_from_line_tail(line)
             if candidate:
                 return candidate
+
+            # pypdf sometimes splits table columns across lines — the country
+            # may appear on the 1–3 lines immediately following the code line.
+            for offset in range(1, 4):
+                if idx + offset >= len(lines):
+                    break
+                next_line = lines[idx + offset]
+                if not next_line:
+                    continue
+                # Stop if we've hit another product code line.
+                if re.match(r"^[A-Z]\d{6,}", next_line):
+                    break
+                candidate = self._country_from_line_tail(next_line)
+                if candidate:
+                    return candidate
 
         return ""
 
@@ -873,6 +888,34 @@ class EDQMDownloader:
             "vegetal",
             "plant",
             "palm",
+            # biological material-origin descriptors that are NOT country names
+            "purified",
+            "human",
+            "recombinant",
+            "native",
+            "bovine",
+            "porcine",
+            "equine",
+            "ovine",
+            "murine",
+            "derived",
+            "extract",
+            "protein",
+            "concentrate",
+            "concentrated",
+            "solution",
+            "plasma",
+            "serum",
+            "urine",
+            "blood",
+            "synthetic",
+            "semisynthetic",
+            "fermentation",
+            "fermented",
+            "biological",
+            "animal",
+            "mineral",
+            "chemical",
         }
 
         segments = [line]
@@ -921,7 +964,13 @@ class EDQMDownloader:
         value = re.sub(r"^(is|the)\s+", "", value, flags=re.IGNORECASE)
 
         # EDQM COO lines can contain material-origin qualifiers before the country.
-        qualifiers = {"synthetic", "vegetal", "plant", "animal", "mineral", "chemical", "biological"}
+        qualifiers = {
+            "synthetic", "vegetal", "plant", "animal", "mineral", "chemical", "biological",
+            "purified", "human", "recombinant", "native", "bovine", "porcine", "equine",
+            "ovine", "murine", "derived", "extract", "protein", "concentrate", "concentrated",
+            "solution", "plasma", "serum", "urine", "blood", "semisynthetic",
+            "fermentation", "fermented",
+        }
         parts = value.split()
         while len(parts) > 1 and parts[0].lower() in qualifiers:
             parts = parts[1:]
@@ -930,7 +979,12 @@ class EDQMDownloader:
         if not value:
             return ""
         lowered = value.lower()
-        if any(token in lowered for token in ("origin", "country", "component", "catalogue", "batch", "preferential")):
+        bio_tokens = (
+            "origin", "country", "component", "catalogue", "batch", "preferential",
+            "purified", "recombinant", "bovine", "porcine", "equine", "ovine", "murine",
+            "plasma", "serum", "urine", "ferment",
+        )
+        if any(token in lowered for token in bio_tokens):
             return ""
         if any(char.isdigit() for char in value):
             return ""
