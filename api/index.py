@@ -1586,30 +1586,27 @@ def _render_download_results(
     download_token: str = "",
     position_count: int = 0,
 ) -> str:
-    hidden_fields = [f'<input type="hidden" name="source" value="{_safe_text(source)}">']
-    hidden_fields.append(f'<input type="hidden" name="codes" value="{_safe_text(chr(10).join(codes))}">')
-    hidden_fields.extend(
-        f'<input type="hidden" name="doc_types" value="{_safe_text(doc)}">' for doc in doc_types
-    )
-    if download_token:
-        hidden_fields.append(f'<input type="hidden" name="token" value="{_safe_text(download_token)}">')
-    action_html = (
-        '<form method="post" action="/download-file" style="margin:0;">'
-        + "".join(hidden_fields)
-        + '<button type="submit">Download Batch ZIP</button>'
-        + '</form>'
-        if position_count
-        else '<span class="button secondary" aria-disabled="true">No ZIP Available</span>'
-    )
+    download_url = f"/download-file?token={_safe_text(download_token)}" if download_token else ""
+    if position_count and download_url:
+        action_html = (
+            f'<a class="button" href="{download_url}" download>Download Batch ZIP</a>'
+        )
+        auto_download_script = (
+            f'<script>window.addEventListener("load",function(){{window.location.assign("{download_url}")}});</script>'
+        )
+    else:
+        action_html = '<span class="button secondary" aria-disabled="true">No ZIP Available</span>'
+        auto_download_script = ""
     return (
         '<div id="download-results-anchor"></div>'
         '<script>scrollToResult("download-results-anchor");</script>'
-        '<section class="table-panel">'
+        + auto_download_script
+        + '<section class="table-panel">'
         '<div class="result-actions">'
         '<div><h3>Download Result</h3><p class="muted">One ZIP at the top level. Each position is a folder inside the archive.</p></div>'
         f'<div style="display:flex; gap:10px; flex-wrap:wrap;">{action_html}<span class="status-pill">{position_count} positions packaged</span></div>'
         '</div>'
-        '<div class="microcopy">The download link expires after 15 minutes or if the server restarts. If the download fails, re-submit the form.</div>'
+        '<div class="microcopy">Your ZIP should download automatically. If not, click the button above. Link expires after 15 minutes.</div>'
         + '</section>'
         + _render_download_summary_table(source, rows, doc_types)
         + f'<section class="manifest-panel"><h3>Batch Manifest</h3><pre>{_safe_text(manifest_text)}</pre></section>'
@@ -2033,6 +2030,9 @@ async def _handle_vercel_entry(request: Request):
         return PlainTextResponse("ok")
 
     if request.method == "GET":
+        if page == "download-file":
+            token = request.query_params.get("token", "")
+            return download_documents_file(token=token)
         if page == "download":
             return download_page()
         if page == "lookup":
@@ -2056,12 +2056,6 @@ async def _handle_vercel_entry(request: Request):
         codes = form_first("codes", "")
         doc_types = [str(value) for value in form_list("doc_types")]
         return download_documents(source=source, codes=codes, doc_types=doc_types)
-
-    if page == "download-file":
-        source = form_first("source", "edqm")
-        codes = form_first("codes", "")
-        doc_types = [str(value) for value in form_list("doc_types")]
-        return download_documents_file(source=source, codes=codes, doc_types=doc_types)
 
     if page == "lookup":
         source = form_first("source", "both")
@@ -2129,7 +2123,7 @@ def download_documents(
     if zip_bytes:
         filename = f"{source.upper()}_BATCH_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{position_count}pos.zip"
         download_token = _store_download_payload(filename, zip_bytes)
-    message = "Download complete. Review the summary below and use Download Batch ZIP." if position_count else "No files were downloaded. Review the summary and manifest below."
+    message = "Download complete. Your ZIP is downloading automatically." if position_count else "No files were downloaded. Review the summary and manifest below."
 
     results_html = _render_download_results(
         source=source,
@@ -2153,37 +2147,18 @@ def download_documents(
     )
 
 
-def download_documents_file(
-    source: str = Form(...),
-    codes: str = Form(""),
-    doc_types: list[str] = Form(default_factory=list),
-    token: str = Form(""),
-):
-    source = source.lower().strip()
-    clean_codes = _parse_lines(codes)
-    clean_doc_types = [doc.upper() for doc in doc_types if doc.upper() in {"COA", "MSDS", "COO"}]
-    if source not in {"edqm", "usp"} or not clean_codes or not clean_doc_types:
-        return Response("Invalid download request.", status_code=400, media_type="text/plain")
+@app.get("/download-file")
+def download_documents_file(token: str = ""):
+    if not token:
+        return Response("Missing download token.", status_code=400, media_type="text/plain")
 
-    if token:
-        cached = _get_download_payload(token)
-        if cached:
-            filename, data = cached
-            return StreamingResponse(
-                BytesIO(data),
-                media_type="application/zip",
-                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-            )
+    cached = _get_download_payload(token)
+    if not cached:
+        return Response("Download expired or not found. Please re-submit the form.", status_code=404, media_type="text/plain")
 
-    batch_result = _download_batch(source, clean_codes, clean_doc_types)
-    zip_bytes = bytes(batch_result.get("zip_bytes", b""))
-    position_count = int(batch_result.get("position_count", 0))
-    if not zip_bytes:
-        return Response("No files available for ZIP download.", status_code=404, media_type="text/plain")
-
-    filename = f"{source.upper()}_BATCH_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{position_count}pos.zip"
+    filename, data = cached
     return StreamingResponse(
-        BytesIO(zip_bytes),
+        BytesIO(data),
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

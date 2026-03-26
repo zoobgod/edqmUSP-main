@@ -80,25 +80,23 @@ class ApiRouteTests(unittest.TestCase):
         self.assertIn("Download Batch ZIP", resp.text)
         self.assertIn("Download Summary", resp.text)
         self.assertIn("G0400006", resp.text)
-        self.assertIn("/download-file", resp.text)
+        self.assertIn("download-file?token=", resp.text)
 
     def test_download_file_route_returns_zip(self):
-        fake_result = {
-            "zip_bytes": b"PK\x03\x04demo",
-            "manifest_text": "Batch generated: demo",
-            "position_count": 1,
-            "rows": [],
-        }
-        with patch("api.index._download_batch", return_value=fake_result):
-            resp = self.client.post(
-                "/api/index.py?page=download-file",
-                data={"source": "edqm", "codes": "G0400006", "doc_types": ["COA", "COO"]},
-            )
+        from api.index import _store_download_payload
+
+        token = _store_download_payload("test_batch.zip", b"PK\x03\x04demo")
+
+        resp = self.client.get(f"/download-file?token={token}")
 
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.headers.get("content-type"), "application/zip")
         self.assertIn("attachment;", resp.headers.get("content-disposition", ""))
         self.assertEqual(resp.content, b"PK\x03\x04demo")
+
+    def test_download_file_route_expired_token(self):
+        resp = self.client.get("/download-file?token=nonexistent")
+        self.assertEqual(resp.status_code, 404)
 
     def test_batch_lookup_post_renders_results(self):
         fake_rows = [
