@@ -66,7 +66,6 @@ class ApiRouteTests(unittest.TestCase):
 
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Download Batch ZIP", resp.text)
-        self.assertIn("Per-Code Status Timeline", resp.text)
         self.assertIn("Download Summary", resp.text)
         self.assertIn("G0400006", resp.text)
         self.assertIn("page=download-file", resp.text)

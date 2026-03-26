@@ -5,12 +5,14 @@ from __future__ import annotations
 import html
 import re
 import sys
+import time
 import zipfile
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.parse import parse_qs
+from uuid import uuid4
 
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response, StreamingResponse
@@ -23,6 +25,8 @@ except Exception:  # pragma: no cover
         sys.path.insert(0, str(PROJECT_ROOT))
 
 app = FastAPI(title="edqmUSP")
+DOWNLOAD_CACHE_TTL_SECONDS = 900
+_DOWNLOAD_CACHE: dict[str, dict[str, object]] = {}
 
 # Optional shared services. If another worker extracts helpers into src/services,
 # this frontend will adopt them automatically without changing route behavior.
@@ -742,6 +746,13 @@ function copyFromTextarea(id) {
   }
   document.execCommand('copy');
 }
+function scrollToResult(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  window.requestAnimationFrame(() => {
+    el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+}
 </script>
 """
 
@@ -796,6 +807,36 @@ def _safe_text(value: str) -> str:
 def _safe_filename(value: str) -> str:
     cleaned = re.sub(r'[\\/*?:"<>|]+', "_", (value or "").strip()).strip(".")
     return cleaned or "download"
+
+
+def _prune_download_cache() -> None:
+    now = time.time()
+    expired = [
+        token
+        for token, payload in _DOWNLOAD_CACHE.items()
+        if now - float(payload.get("created_at", 0)) > DOWNLOAD_CACHE_TTL_SECONDS
+    ]
+    for token in expired:
+        _DOWNLOAD_CACHE.pop(token, None)
+
+
+def _store_download_payload(filename: str, data: bytes) -> str:
+    _prune_download_cache()
+    token = uuid4().hex
+    _DOWNLOAD_CACHE[token] = {
+        "filename": filename,
+        "data": data,
+        "created_at": time.time(),
+    }
+    return token
+
+
+def _get_download_payload(token: str) -> tuple[str, bytes] | None:
+    _prune_download_cache()
+    payload = _DOWNLOAD_CACHE.get(token)
+    if not payload:
+        return None
+    return str(payload["filename"]), bytes(payload["data"])
 
 
 def _service_call(module, names: tuple[str, ...], *args, **kwargs):
@@ -1177,8 +1218,7 @@ def _usp_product_summary(downloader) -> dict[str, str]:
 
 
 def _storage_suffix(summary: dict[str, str]) -> str:
-    storage = (summary.get("storage") or "").strip()
-    return f" ({storage})" if storage else ""
+    return ""
 
 
 def _download_batch(source: str, codes: list[str], doc_types: list[str]) -> dict[str, object]:
@@ -1391,52 +1431,13 @@ def _download_form(
     checked = lambda doc: "checked" if doc.upper() in active_docs else ""
     note = f'<p class="note">{_safe_text(message)}</p>' if message else ""
     return f"""
-<section class="hero-shell">
-  <div class="hero-grid">
-    <div class="hero-copy">
-      <span class="eyebrow">Download</span>
-      <h1>Batch download by catalogue code.</h1>
-      <p class="lede">Choose source, paste codes, download one batch ZIP.</p>
-      <div class="task-strip">
-        <span class="task-pill"><b>1</b> Select source</span>
-        <span class="task-pill"><b>2</b> Paste codes</span>
-        <span class="task-pill"><b>3</b> Download ZIP</span>
+<section class="surface">
+  <form method="post" action="/api/index.py?page=download" class="panel section-stack">
+      <div>
+        <h2>Download Documents</h2>
+        <p class="muted">Paste catalogue codes, choose documents, then review the summary below.</p>
       </div>
       {note}
-      <div class="hero-stats">
-        <div class="grid">
-          <div class="stat">
-            <span class="stat-value">COA / MSDS / COO</span>
-            <span class="stat-label">Select any combination</span>
-          </div>
-          <div class="stat">
-            <span class="stat-value">One batch ZIP</span>
-            <span class="stat-label">Folders grouped by position inside the ZIP</span>
-          </div>
-          <div class="stat">
-            <span class="stat-value">Manifest included</span>
-            <span class="stat-label">Shows missing documents per code</span>
-          </div>
-        </div>
-      </div>
-    </div>
-    <aside class="hero-aside">
-      <h3>Quick rules</h3>
-      <ul>
-        <li>Run one source at a time: EDQM or USP.</li>
-        <li>Use one code per line.</li>
-        <li>If a file is missing, check the manifest section.</li>
-      </ul>
-    </aside>
-  </div>
-</section>
-
-<section class="surface">
-  <div class="form-grid">
-    <form method="post" action="/api/index.py?page=download" class="panel">
-      <h2>Batch Input</h2>
-      <p class="muted">Task-first mode: minimal input, direct output.</p>
-
       <div class="field-group">
         <label for="source">1) Source</label>
         <div class="field-hint">Choose the catalogue family.</div>
@@ -1463,59 +1464,11 @@ def _download_form(
       </div>
 
       <button type="submit">Generate ZIP</button>
-      <div class="microcopy" style="margin-top: 12px;">After processing you will get one ZIP, a per-code timeline, summary table, and attention notes.</div>
-    </form>
-
-    <aside class="panel section-stack">
-      <div>
-        <h3>Notes</h3>
-        <ul class="mini-list">
-          <li>Keep source and codes consistent.</li>
-          <li>Manifest shows exact failures per document type.</li>
-          <li>You can re-run quickly with edited code list.</li>
-        </ul>
-      </div>
-    </aside>
-  </div>
+      <div class="microcopy">One batch ZIP, folders by position, summary table below, manifest kept as-is.</div>
+  </form>
   {results_html}
 </section>
 """
-
-
-def _render_download_timeline(rows: list[dict[str, object]]) -> str:
-    cards: list[str] = []
-    for row in rows:
-        code = str(row.get("code", ""))
-        name = str(row.get("name", ""))
-        steps = []
-        for step in row.get("timeline", []):
-            label = _safe_text(str(step.get("label", "")))
-            status = str(step.get("status", "neutral"))
-            css = "ok" if status == "ok" else "fail" if status == "fail" else "neutral"
-            text = "OK" if status == "ok" else "Fail" if status == "fail" else "Pending"
-            steps.append(f'<span class="step-pill {css}"><b>{label}</b> {text}</span>')
-
-        notes = "".join(
-            f'<div class="note-item">{_safe_text(str(note))}</div>'
-            for note in row.get("notes", [])
-        )
-        cards.append(
-            '<article class="timeline-card">'
-            '<div class="timeline-card-header">'
-            f'<div><h3>{_safe_text(code)}</h3><p class="muted">{_safe_text(name or "No product resolved")}</p></div>'
-            f'<div class="timeline-card-meta"><span class="status-pill">{_safe_text(str(row.get("source", "")))}</span></div>'
-            '</div>'
-            f'<div class="step-list inline">{"".join(steps)}</div>'
-            + (f'<div class="notes-list">{notes}</div>' if notes else "")
-            + '</article>'
-        )
-
-    return (
-        '<section class="table-panel">'
-        '<div class="table-header"><div><h3>Per-Code Status Timeline</h3><p class="muted">Each code shows search, metadata, document download, and packaging status.</p></div></div>'
-        f'<div class="timeline-grid">{"".join(cards)}</div>'
-        '</section>'
-    )
 
 
 def _render_download_summary_table(source: str, rows: list[dict[str, object]], doc_types: list[str]) -> str:
@@ -1587,6 +1540,7 @@ def _render_download_results(
     rows: list[dict[str, object]],
     doc_types: list[str],
     manifest_text: str,
+    download_token: str = "",
     position_count: int = 0,
 ) -> str:
     hidden_fields = [f'<input type="hidden" name="source" value="{_safe_text(source)}">']
@@ -1594,8 +1548,10 @@ def _render_download_results(
     hidden_fields.extend(
         f'<input type="hidden" name="doc_types" value="{_safe_text(doc)}">' for doc in doc_types
     )
+    if download_token:
+        hidden_fields.append(f'<input type="hidden" name="token" value="{_safe_text(download_token)}">')
     action_html = (
-        '<form method="post" action="/api/index.py?page=download-file" target="_blank" style="margin:0;">'
+        '<form method="post" action="/api/index.py?page=download-file" style="margin:0;">'
         + "".join(hidden_fields)
         + '<button type="submit">Download Batch ZIP</button>'
         + '</form>'
@@ -1603,13 +1559,14 @@ def _render_download_results(
         else '<span class="button secondary" aria-disabled="true">No ZIP Available</span>'
     )
     return (
+        '<div id="download-results-anchor"></div>'
+        '<script>scrollToResult("download-results-anchor");</script>'
         '<section class="table-panel">'
         '<div class="result-actions">'
-        '<div><h3>Batch Result</h3><p class="muted">One ZIP at the top level. Each position is a folder inside the archive.</p></div>'
+        '<div><h3>Download Result</h3><p class="muted">One ZIP at the top level. Each position is a folder inside the archive.</p></div>'
         f'<div style="display:flex; gap:10px; flex-wrap:wrap;">{action_html}<span class="status-pill">{position_count} positions packaged</span></div>'
         '</div>'
-        '</section>'
-        + _render_download_timeline(rows)
+        + '</section>'
         + _render_download_summary_table(source, rows, doc_types)
         + f'<section class="manifest-panel"><h3>Batch Manifest</h3><pre>{_safe_text(manifest_text)}</pre></section>'
     )
@@ -1618,39 +1575,13 @@ def _render_download_results(
 def _lookup_form(source: str = "both", names: str = "", table_html: str = "", message: str = "") -> str:
     note = f'<p class="note">{_safe_text(message)}</p>' if message else ""
     return f"""
-<section class="hero-shell">
-  <div class="hero-grid">
-    <div class="hero-copy">
-      <span class="eyebrow">Lookup</span>
-      <h1>Find catalogue numbers from product names.</h1>
-      <p class="lede">Paste messy lines, get usable EDQM/USP codes.</p>
-      <div class="task-strip">
-        <span class="task-pill"><b>1</b> Paste names</span>
-        <span class="task-pill"><b>2</b> Run lookup</span>
-        <span class="task-pill"><b>3</b> Copy code column</span>
+<section class="surface">
+    <form method="post" action="/api/index.py?page=lookup" class="panel section-stack">
+      <div>
+        <h2>Find Catalogue Numbers</h2>
+        <p class="muted">Paste product names line by line and review matches directly below.</p>
       </div>
       {note}
-      <div class="hero-actions">
-        <a class="button secondary" href="/download">Open downloader</a>
-      </div>
-    </div>
-    <aside class="hero-aside">
-      <h3>Lookup behavior</h3>
-      <ul>
-        <li>Tries cleaned variants of each line.</li>
-        <li>Supports combined strings with slashes and notes.</li>
-        <li>Returns closest matches by source.</li>
-      </ul>
-    </aside>
-  </div>
-</section>
-
-<section class="surface">
-  <div class="form-grid">
-    <form method="post" action="/api/index.py?page=lookup" class="panel">
-      <h2>Lookup Input</h2>
-      <p class="muted">Bulk input optimized for copied task lists.</p>
-
       <div class="field-group">
         <label for="source">1) Source</label>
         <div class="field-hint">Use both if unknown.</div>
@@ -1669,18 +1600,6 @@ def _lookup_form(source: str = "both", names: str = "", table_html: str = "", me
 
       <button type="submit" class="secondary">Run Lookup</button>
     </form>
-
-    <aside class="panel section-stack">
-      <div>
-        <h3>Examples</h3>
-        <ul class="mini-list">
-          <li><code>Raltegravir Impurity E RS / ... (EDQM)</code></li>
-          <li><code>Sodium taurocholate BRP 10000 mg / ...</code></li>
-          <li><code>Cisplatin</code></li>
-        </ul>
-      </div>
-    </aside>
-  </div>
   {table_html}
 </section>
 """
@@ -1690,40 +1609,13 @@ def _batch_lookup_form(source: str = "edqm", codes: str = "", table_html: str = 
     source = source.lower().strip()
     note = f'<p class="note">{_safe_text(message)}</p>' if message else ""
     return f"""
-<section class="hero-shell">
-  <div class="hero-grid">
-    <div class="hero-copy">
-      <span class="eyebrow">Batch Lookup</span>
-      <h1>Get current batch numbers by catalogue code.</h1>
-      <p class="lede">Paste one code per line and return the current EDQM batch number or the current USP lot number.</p>
-      <div class="task-strip">
-        <span class="task-pill"><b>1</b> Select source</span>
-        <span class="task-pill"><b>2</b> Paste codes</span>
-        <span class="task-pill"><b>3</b> Copy batch column</span>
+<section class="surface">
+    <form method="post" action="/api/index.py?page=batches" class="panel section-stack">
+      <div>
+        <h2>Current Batch Numbers</h2>
+        <p class="muted">Paste catalogue codes line by line and review current batch values below.</p>
       </div>
       {note}
-      <div class="hero-actions">
-        <a class="button secondary" href="/download">Open downloader</a>
-        <a class="button ghost" href="/lookup">Open catalogue finder</a>
-      </div>
-    </div>
-    <aside class="hero-aside">
-      <h3>Batch source</h3>
-      <ul>
-        <li>EDQM: reads the current batch number from the detailed product page.</li>
-        <li>USP: reads the current lot number from the batch table.</li>
-        <li>Returns one result row per input code.</li>
-      </ul>
-    </aside>
-  </div>
-</section>
-
-<section class="surface">
-  <div class="form-grid">
-    <form method="post" action="/api/index.py?page=batches" class="panel">
-      <h2>Batch Input</h2>
-      <p class="muted">Bulk mode for current batch checks.</p>
-
       <div class="field-group">
         <label for="source">1) Source</label>
         <div class="field-hint">Choose one source at a time.</div>
@@ -1741,18 +1633,6 @@ def _batch_lookup_form(source: str = "edqm", codes: str = "", table_html: str = 
 
       <button type="submit" class="secondary">Run Batch Lookup</button>
     </form>
-
-    <aside class="panel section-stack">
-      <div>
-        <h3>Output</h3>
-        <ul class="mini-list">
-          <li>Copy the whole batch column in one action.</li>
-          <li>Use the table view to review code and product name together.</li>
-          <li>Re-run quickly after editing only the missing lines.</li>
-        </ul>
-      </div>
-    </aside>
-  </div>
   {table_html}
 </section>
 """
@@ -1791,6 +1671,8 @@ def _lookup_results_table(rows: list[dict[str, str]]) -> str:
             "</tr>"
         )
     return (
+        '<div id="lookup-results-anchor"></div>'
+        '<script>scrollToResult("lookup-results-anchor");</script>'
         '<section class="table-panel">'
         '<div class="table-header">'
         '<div><h3>Lookup Results</h3><p class="muted">Task-ready output for copy/paste into your next step.</p></div>'
@@ -1852,6 +1734,8 @@ def _batch_results_table(rows: list[dict[str, str]]) -> str:
 
     tsv_text = "\n".join(tsv_rows)
     return (
+        '<div id="batch-results-anchor"></div>'
+        '<script>scrollToResult("batch-results-anchor");</script>'
         '<section class="table-panel">'
         '<div class="table-header">'
         '<div><h3>Current Batch Results</h3><p class="muted">Copy-ready output for batch release checks.</p></div>'
@@ -2075,7 +1959,12 @@ def download_documents(
     manifest_text = str(batch_result.get("manifest_text", ""))
     position_count = int(batch_result.get("position_count", 0))
     rows = list(batch_result.get("rows", []))
-    message = "Download complete. Review the summary and use the ZIP button at the top." if position_count else "No files were downloaded. Review the summary and manifest below."
+    zip_bytes = bytes(batch_result.get("zip_bytes", b""))
+    download_token = ""
+    if zip_bytes:
+        filename = f"{source.upper()}_BATCH_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{position_count}pos.zip"
+        download_token = _store_download_payload(filename, zip_bytes)
+    message = "Download complete. Review the summary below and use Download Batch ZIP." if position_count else "No files were downloaded. Review the summary and manifest below."
 
     results_html = _render_download_results(
         source=source,
@@ -2083,6 +1972,7 @@ def download_documents(
         rows=rows,
         doc_types=clean_doc_types,
         manifest_text=manifest_text,
+        download_token=download_token,
         position_count=position_count,
     )
     return _page(
@@ -2102,12 +1992,23 @@ def download_documents_file(
     source: str = Form(...),
     codes: str = Form(""),
     doc_types: list[str] = Form(default_factory=list),
+    token: str = Form(""),
 ):
     source = source.lower().strip()
     clean_codes = _parse_lines(codes)
     clean_doc_types = [doc.upper() for doc in doc_types if doc.upper() in {"COA", "MSDS", "COO"}]
     if source not in {"edqm", "usp"} or not clean_codes or not clean_doc_types:
         return Response("Invalid download request.", status_code=400, media_type="text/plain")
+
+    if token:
+        cached = _get_download_payload(token)
+        if cached:
+            filename, data = cached
+            return StreamingResponse(
+                BytesIO(data),
+                media_type="application/zip",
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            )
 
     batch_result = _download_batch(source, clean_codes, clean_doc_types)
     zip_bytes = bytes(batch_result.get("zip_bytes", b""))
