@@ -496,6 +496,29 @@ textarea {
 .copy-box.compact {
   min-height: 92px;
 }
+.lookup-details {
+  min-width: 240px;
+}
+.lookup-details summary {
+  cursor: pointer;
+  font-weight: 700;
+  color: var(--teal);
+}
+.lookup-detail-grid {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+.lookup-detail-item {
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: rgba(17, 32, 57, 0.04);
+}
+.lookup-detail-item b {
+  display: block;
+  margin-bottom: 4px;
+}
 .table-code {
   font-family: "SFMono-Regular", "Consolas", "Liberation Mono", monospace;
   font-weight: 700;
@@ -659,6 +682,39 @@ tbody tr:hover td {
 .wrap-cell {
   white-space: normal;
   min-width: 180px;
+}
+.action-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(17, 32, 57, 0.05);
+  font-weight: 700;
+}
+.action-pill.ok {
+  color: #163c8c;
+  border-color: rgba(31, 88, 195, 0.2);
+  background: rgba(45, 124, 255, 0.1);
+}
+.action-pill.warn {
+  color: #8a5a13;
+  border-color: rgba(201, 139, 60, 0.25);
+  background: rgba(201, 139, 60, 0.12);
+}
+.action-pill.fail {
+  color: #96273a;
+  border-color: rgba(209, 73, 91, 0.22);
+  background: rgba(209, 73, 91, 0.08);
+}
+.table-link {
+  color: var(--teal);
+  font-weight: 700;
+  text-decoration: none;
+}
+.table-link:hover {
+  text-decoration: underline;
 }
 .manifest-panel {
   margin-top: 22px;
@@ -978,6 +1034,122 @@ def _search_lookup_candidates(downloader, raw_query: str, limit: int = 8) -> tup
     return [], fallback
 
 
+def _compact_lookup_value(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (value or "").lower())
+
+
+def _lookup_match_type(raw_query: str, used_candidate: str) -> str:
+    cleaned_query = _clean_lookup_fragment(raw_query)
+    compact_raw = _compact_lookup_value(raw_query)
+    compact_clean = _compact_lookup_value(cleaned_query)
+    compact_used = _compact_lookup_value(used_candidate)
+
+    if compact_used and compact_used == compact_raw:
+        return "Exact"
+    if compact_used and compact_used == compact_clean:
+        return "Normalized"
+    if compact_clean and compact_used and compact_clean.startswith(compact_used) and compact_clean != compact_used:
+        return "Prefix fallback"
+    if compact_clean and compact_used and compact_used in compact_clean:
+        return "Broad match"
+    return "Broad match"
+
+
+def _edqm_lookup_enrichment(downloader, product_code: str) -> dict[str, str]:
+    if not downloader.search_product(product_code):
+        return {}
+
+    summary = _edqm_detail_summary(downloader)
+    return {
+        "availability": summary.get("availability", ""),
+        "price": summary.get("price", ""),
+        "current_batch": summary.get("current_batch", ""),
+        "unit_quantity": summary.get("unit_quantity", ""),
+    }
+
+
+def _edqm_batch_summary(downloader, product_code: str) -> dict[str, str]:
+    if not downloader.search_product(product_code):
+        return {}
+
+    current = getattr(downloader, "_current", None)
+    extractor = getattr(downloader, "_extract_detail_fields", None)
+    if not current or not callable(extractor):
+        return {}
+
+    try:
+        fields = extractor(current.detail_html)
+    except Exception:
+        return {}
+
+    return {
+        "name": fields.get("Name") or current.name or product_code,
+        "current_batch": fields.get("Current batch number", ""),
+        "availability": fields.get("Availability", ""),
+        "price": fields.get("Price", ""),
+        "storage": fields.get("EDQM long term storage conditions", ""),
+        "dispatching": fields.get("Dispatching conditions", ""),
+        "unit_quantity": fields.get("Unit quantity per vial", ""),
+        "sales_restriction": fields.get("Sales restriction", ""),
+        "detail_url": getattr(downloader, "get_detail_url", lambda _code: "")(product_code),
+    }
+
+
+def _usp_batch_summary(downloader, product_code: str) -> dict[str, str]:
+    if not downloader.search_product(product_code):
+        return {}
+
+    product = getattr(downloader, "_current_product", None)
+    if not product:
+        return {}
+
+    current_lot = None
+    for lot in product.lots:
+        if getattr(lot, "current", False):
+            current_lot = lot
+            break
+
+    dated_lot = None
+    for lot in product.lots:
+        if getattr(lot, "valid_use_date", ""):
+            dated_lot = lot
+            break
+
+    lot_for_display = current_lot or dated_lot or (product.lots[0] if product.lots else None)
+    return {
+        "name": product.display_name or product.repository_id,
+        "current_lot": getattr(lot_for_display, "lot_number", "") if lot_for_display else "",
+        "valid_use_date": getattr(lot_for_display, "valid_use_date", "") if lot_for_display else "",
+        "country_of_origin": getattr(lot_for_display, "origin_country", "") if lot_for_display else product.country_of_origin,
+        "material_origin": getattr(lot_for_display, "material_origin", "") if lot_for_display else "",
+        "certificate_valid": "Yes" if getattr(lot_for_display, "certificate_valid", False) else "No" if lot_for_display else "",
+        "current_flag": "Yes" if getattr(lot_for_display, "current", False) else "No" if lot_for_display else "",
+        "detail_url": getattr(downloader, "get_detail_url", lambda _code: "")(product_code),
+    }
+
+
+def _batch_actionability(source: str, summary: dict[str, str]) -> tuple[str, str]:
+    if source.lower() == "edqm":
+        if summary.get("current_batch"):
+            return "Current", "ok"
+        return "Batch not found", "fail"
+
+    current_lot = (summary.get("current_lot") or "").strip()
+    certificate_valid = (summary.get("certificate_valid") or "").strip().lower() == "yes"
+    current_flag = (summary.get("current_flag") or "").strip().lower() == "yes"
+    valid_use_date = (summary.get("valid_use_date") or "").strip()
+
+    if current_lot and current_flag and certificate_valid:
+        return "Current / certificate valid", "ok"
+    if current_lot and current_flag:
+        return "Current", "ok"
+    if current_lot and valid_use_date:
+        return "Expired / dated lot only", "warn"
+    if certificate_valid:
+        return "Certificate valid", "warn"
+    return "Batch not found", "fail"
+
+
 def _bundle_name(source: str, code: str, position_name: str) -> str:
     shared = _service_call(
         _bundles_service,
@@ -1116,6 +1288,7 @@ def _edqm_detail_summary(downloader) -> dict[str, str]:
         "price": fields.get("Price", ""),
         "availability": fields.get("Availability", ""),
         "storage": fields.get("EDQM long term storage conditions", ""),
+        "unit_quantity": fields.get("Unit quantity per vial", ""),
     }
 
 
@@ -1331,38 +1504,69 @@ def _lookup_catalogue_numbers(source: str, names: list[str], limit: int = 8) -> 
 
             with EDQMDownloader(download_dir=tmp_path) as downloader:
                 for query in names:
-                    matches, _used_candidate = _search_lookup_candidates(downloader, query, limit=limit)
+                    matches, used_candidate = _search_lookup_candidates(downloader, query, limit=limit)
                     if matches:
-                        for match in matches:
+                        for idx, match in enumerate(matches, start=1):
+                            enrichment = _edqm_lookup_enrichment(downloader, match.product_code) if idx <= 2 else {}
                             rows.append(
                                 {
                                     "query": query,
+                                    "matched_on": used_candidate,
+                                    "match_type": _lookup_match_type(query, used_candidate),
+                                    "rank": str(idx),
                                     "source": "EDQM",
                                     "code": match.product_code,
                                     "name": match.name,
+                                    "enrichment": enrichment,
                                 }
                             )
                     else:
-                        rows.append({"query": query, "source": "EDQM", "code": "", "name": "No match found"})
+                        rows.append(
+                            {
+                                "query": query,
+                                "matched_on": used_candidate,
+                                "match_type": "No match",
+                                "rank": "",
+                                "source": "EDQM",
+                                "code": "",
+                                "name": "No match found",
+                                "enrichment": {},
+                            }
+                        )
 
         if source in {"usp", "both"}:
             from src.downloaders.usp import USPDownloader
 
             with USPDownloader(download_dir=tmp_path) as downloader:
                 for query in names:
-                    matches, _used_candidate = _search_lookup_candidates(downloader, query, limit=limit)
+                    matches, used_candidate = _search_lookup_candidates(downloader, query, limit=limit)
                     if matches:
-                        for match in matches:
+                        for idx, match in enumerate(matches, start=1):
                             rows.append(
                                 {
                                     "query": query,
+                                    "matched_on": used_candidate,
+                                    "match_type": _lookup_match_type(query, used_candidate),
+                                    "rank": str(idx),
                                     "source": "USP",
                                     "code": match.product_code,
                                     "name": match.name,
+                                    "enrichment": dict(getattr(match, "metadata", {}) or {}),
                                 }
                             )
                     else:
-                        rows.append({"query": query, "source": "USP", "code": "", "name": "No match found"})
+                        rows.append(
+                            {
+                                "query": query,
+                                "matched_on": used_candidate,
+                                "match_type": "No match",
+                                "rank": "",
+                                "source": "USP",
+                                "code": "",
+                                "name": "No match found",
+                                "enrichment": {},
+                            }
+                        )
 
     return rows
 
@@ -1390,18 +1594,23 @@ def _lookup_current_batches(source: str, codes: list[str]) -> list[dict[str, str
                             "name": "",
                             "batch_number": "",
                             "status": "Product not found",
+                            "summary": {},
+                            "detail_url": "",
+                            "actionability": "Batch not found",
+                            "actionability_class": "fail",
                         }
                     )
                     continue
 
-                position_name = _resolve_position_name(downloader, code)
-                getter = getattr(downloader, "get_current_batch_number", None)
-                batch_number = ""
-                if callable(getter):
-                    try:
-                        batch_number = (getter(code) or "").strip()
-                    except Exception:
-                        batch_number = ""
+                if source == "edqm":
+                    summary = _edqm_batch_summary(downloader, code)
+                    batch_number = summary.get("current_batch", "")
+                else:
+                    summary = _usp_batch_summary(downloader, code)
+                    batch_number = summary.get("current_lot", "")
+
+                position_name = summary.get("name") or _resolve_position_name(downloader, code)
+                actionability, actionability_class = _batch_actionability(source, summary)
 
                 rows.append(
                     {
@@ -1411,6 +1620,10 @@ def _lookup_current_batches(source: str, codes: list[str]) -> list[dict[str, str
                         "name": position_name,
                         "batch_number": batch_number,
                         "status": "OK" if batch_number else "Batch not found",
+                        "summary": summary,
+                        "detail_url": summary.get("detail_url", ""),
+                        "actionability": actionability,
+                        "actionability_class": actionability_class,
                     }
                 )
         finally:
@@ -1645,12 +1858,55 @@ def _lookup_results_table(rows: list[dict[str, str]]) -> str:
     unique_codes = list(dict.fromkeys(catalogue_numbers))
     code_column = "\n".join(catalogue_numbers)
     unique_code_column = "\n".join(unique_codes)
-    tsv_rows = ["Query\tSource\tCatalogue Number\tProduct Name"]
+    tsv_rows = ["Query\tMatched On\tMatch Type\tSource\tCatalogue Number\tProduct Name"]
+
+    def render_lookup_details(row: dict[str, str]) -> str:
+        enrichment = row.get("enrichment", {})
+        if not isinstance(enrichment, dict):
+            enrichment = {}
+
+        if row["source"] == "USP":
+            fields = [
+                ("List Price", enrichment.get("price", "")),
+                ("Current Lot", enrichment.get("current_lot", "")),
+                ("In Stock", enrichment.get("in_stock", "")),
+                ("Ready to Ship", enrichment.get("ready_to_ship", "")),
+                ("Pack Size", enrichment.get("packing_size", "")),
+                ("UOM", enrichment.get("uom", "")),
+                ("CAS", enrichment.get("cas", "")),
+                ("Molecular Formula", enrichment.get("molecular_formula", "")),
+                ("Category", enrichment.get("category_type", "")),
+            ]
+        else:
+            fields = [
+                ("Availability", enrichment.get("availability", "")),
+                ("Price", enrichment.get("price", "")),
+                ("Current Batch", enrichment.get("current_batch", "")),
+                ("Unit Quantity", enrichment.get("unit_quantity", "")),
+            ]
+
+        visible = [(label, value) for label, value in fields if value]
+        if not visible:
+            return "—"
+
+        body = "".join(
+            f'<div class="lookup-detail-item"><b>{_safe_text(label)}</b><span>{_safe_text(str(value))}</span></div>'
+            for label, value in visible
+        )
+        return (
+            '<details class="lookup-details">'
+            '<summary>View details</summary>'
+            f'<div class="lookup-detail-grid">{body}</div>'
+            '</details>'
+        )
+
     for row in rows:
         tsv_rows.append(
             "\t".join(
                 [
                     row["query"],
+                    row.get("matched_on", ""),
+                    row.get("match_type", ""),
                     row["source"],
                     row["code"],
                     row["name"],
@@ -1665,9 +1921,12 @@ def _lookup_results_table(rows: list[dict[str, str]]) -> str:
         body.append(
             "<tr>"
             f"<td>{_safe_text(row['query'])}</td>"
+            f"<td>{_safe_text(row.get('matched_on', ''))}</td>"
+            f"<td>{_safe_text(row.get('match_type', ''))}</td>"
             f"<td>{_safe_text(row['source'])}</td>"
             f'<td class="{klass} table-code">{_safe_text(status)}</td>'
             f"<td>{_safe_text(row['name'])}</td>"
+            f"<td>{render_lookup_details(row)}</td>"
             "</tr>"
         )
     return (
@@ -1675,7 +1934,7 @@ def _lookup_results_table(rows: list[dict[str, str]]) -> str:
         '<script>scrollToResult("lookup-results-anchor");</script>'
         '<section class="table-panel">'
         '<div class="table-header">'
-        '<div><h3>Lookup Results</h3><p class="muted">Task-ready output for copy/paste into your next step.</p></div>'
+        '<div><h3>Lookup Results</h3><p class="muted">Choose the right position faster with matched-on context and lightweight source metadata.</p></div>'
         f'<div style="display:flex; gap:10px; flex-wrap:wrap;"><span class="status-pill">{success_count} matches</span>'
         f'<span class="status-pill {"fail" if failed_count else ""}">{failed_count} no-match rows</span></div>'
         "</div>"
@@ -1691,7 +1950,7 @@ def _lookup_results_table(rows: list[dict[str, str]]) -> str:
         f'<textarea id="catalogue-copy-tsv" class="copy-box" readonly style="min-height: 180px;">{_safe_text(tsv_text)}</textarea>'
         '</div>'
         '<div class="table-wrap"><table><thead><tr>'
-        "<th>Query</th><th>Source</th><th>Catalogue Number</th><th>Product Name</th>"
+        "<th>Original Input</th><th>Matched On</th><th>Match Type</th><th>Source</th><th>Catalogue Number</th><th>Product Name</th><th>Details</th>"
         "</tr></thead><tbody>"
         + "".join(body)
         + "</tbody></table></div></section>"
@@ -1705,32 +1964,104 @@ def _batch_results_table(rows: list[dict[str, str]]) -> str:
     unique_batches = list(dict.fromkeys(batch_numbers))
     batch_column = "\n".join(batch_numbers)
     unique_batch_column = "\n".join(unique_batches)
-    tsv_rows = ["Input\tSource\tCatalogue Number\tProduct Name\tCurrent Batch Number"]
+    source_key = (rows[0]["source"].lower() if rows else "edqm")
+    if source_key == "usp":
+        tsv_rows = ["Input\tSource\tCode\tName\tCurrent Lot\tValid Use Date\tCOO\tMaterial Origin\tCertificate Valid\tActionability\tDetail URL"]
+        header_html = (
+            "<th>Input</th><th>Source</th><th>Code</th><th>Name</th><th>Current Lot</th><th>Valid Use Date</th>"
+            "<th>COO</th><th>Material Origin</th><th>Certificate Valid</th><th>Actionability</th><th>Detail</th>"
+        )
+    else:
+        tsv_rows = ["Input\tSource\tCode\tName\tCurrent Batch\tAvailability\tPrice\tStorage\tDispatching\tActionability\tDetail URL"]
+        header_html = (
+            "<th>Input</th><th>Source</th><th>Code</th><th>Name</th><th>Current Batch</th><th>Availability</th>"
+            "<th>Price</th><th>Storage</th><th>Dispatching</th><th>Actionability</th><th>Detail</th>"
+        )
     body = []
 
     for row in rows:
-        rendered_batch = row["batch_number"] or row["status"]
-        tsv_rows.append(
-            "\t".join(
-                [
-                    row["query"],
-                    row["source"],
-                    row["code"],
-                    row["name"],
-                    rendered_batch,
-                ]
+        summary = row.get("summary", {}) if isinstance(row.get("summary", {}), dict) else {}
+        detail_url = str(row.get("detail_url", "") or "")
+        detail_link = f'<a class="table-link" href="{_safe_text(detail_url)}" target="_blank" rel="noreferrer">Open</a>' if detail_url else "—"
+        actionability = str(row.get("actionability", "") or row.get("status", ""))
+        action_class = str(row.get("actionability_class", "fail"))
+
+        if source_key == "usp":
+            current_lot = summary.get("current_lot", "") or row["status"]
+            valid_use_date = summary.get("valid_use_date", "")
+            coo = summary.get("country_of_origin", "")
+            material_origin = summary.get("material_origin", "")
+            certificate_valid = summary.get("certificate_valid", "")
+            tsv_rows.append(
+                "\t".join(
+                    [
+                        row["query"],
+                        row["source"],
+                        row["code"],
+                        row["name"],
+                        current_lot,
+                        valid_use_date,
+                        coo,
+                        material_origin,
+                        certificate_valid,
+                        actionability,
+                        detail_url,
+                    ]
+                )
             )
-        )
-        klass = "status-ok" if row["batch_number"] else "status-fail"
-        body.append(
-            "<tr>"
-            f"<td>{_safe_text(row['query'])}</td>"
-            f"<td>{_safe_text(row['source'])}</td>"
-            f'<td class="table-code">{_safe_text(row["code"])}</td>'
-            f"<td>{_safe_text(row['name'])}</td>"
-            f'<td class="{klass} table-code">{_safe_text(rendered_batch)}</td>'
-            "</tr>"
-        )
+            body.append(
+                "<tr>"
+                f"<td>{_safe_text(row['query'])}</td>"
+                f"<td>{_safe_text(row['source'])}</td>"
+                f'<td class="table-code">{_safe_text(row["code"])}</td>'
+                f"<td>{_safe_text(row['name'])}</td>"
+                f'<td class="table-code">{_safe_text(current_lot)}</td>'
+                f"<td>{_safe_text(valid_use_date or '—')}</td>"
+                f"<td>{_safe_text(coo or '—')}</td>"
+                f"<td>{_safe_text(material_origin or '—')}</td>"
+                f"<td>{_safe_text(certificate_valid or '—')}</td>"
+                f'<td><span class="action-pill {action_class}">{_safe_text(actionability)}</span></td>'
+                f"<td>{detail_link}</td>"
+                "</tr>"
+            )
+        else:
+            current_batch = summary.get("current_batch", "") or row["status"]
+            availability = summary.get("availability", "")
+            price = summary.get("price", "")
+            storage = summary.get("storage", "")
+            dispatching = summary.get("dispatching", "")
+            tsv_rows.append(
+                "\t".join(
+                    [
+                        row["query"],
+                        row["source"],
+                        row["code"],
+                        row["name"],
+                        current_batch,
+                        availability,
+                        price,
+                        storage,
+                        dispatching,
+                        actionability,
+                        detail_url,
+                    ]
+                )
+            )
+            body.append(
+                "<tr>"
+                f"<td>{_safe_text(row['query'])}</td>"
+                f"<td>{_safe_text(row['source'])}</td>"
+                f'<td class="table-code">{_safe_text(row["code"])}</td>'
+                f"<td>{_safe_text(row['name'])}</td>"
+                f'<td class="table-code">{_safe_text(current_batch)}</td>'
+                f"<td>{_safe_text(availability or '—')}</td>"
+                f"<td>{_safe_text(price or '—')}</td>"
+                f"<td>{_safe_text(storage or '—')}</td>"
+                f"<td>{_safe_text(dispatching or '—')}</td>"
+                f'<td><span class="action-pill {action_class}">{_safe_text(actionability)}</span></td>'
+                f"<td>{detail_link}</td>"
+                "</tr>"
+            )
 
     tsv_text = "\n".join(tsv_rows)
     return (
@@ -1738,7 +2069,7 @@ def _batch_results_table(rows: list[dict[str, str]]) -> str:
         '<script>scrollToResult("batch-results-anchor");</script>'
         '<section class="table-panel">'
         '<div class="table-header">'
-        '<div><h3>Current Batch Results</h3><p class="muted">Copy-ready output for batch release checks.</p></div>'
+        '<div><h3>Current Batch Results</h3><p class="muted">Batch view enriched with source metadata, actionability, and direct detail links.</p></div>'
         f'<div style="display:flex; gap:10px; flex-wrap:wrap;"><span class="status-pill">{found_count} batches found</span>'
         f'<span class="status-pill {"fail" if missing_count else ""}">{missing_count} missing</span></div>'
         "</div>"
@@ -1754,8 +2085,8 @@ def _batch_results_table(rows: list[dict[str, str]]) -> str:
         f'<textarea id="batch-copy-tsv" class="copy-box" readonly style="min-height: 180px;">{_safe_text(tsv_text)}</textarea>'
         '</div>'
         '<div class="table-wrap"><table><thead><tr>'
-        "<th>Input</th><th>Source</th><th>Catalogue Number</th><th>Product Name</th><th>Current Batch Number</th>"
-        "</tr></thead><tbody>"
+        + header_html
+        + "</tr></thead><tbody>"
         + "".join(body)
         + "</tbody></table></div></section>"
     )

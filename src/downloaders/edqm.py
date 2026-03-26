@@ -57,6 +57,7 @@ class ProductMatch:
     product_code: str
     name: str
     source: str = "EDQM"
+    metadata: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -506,6 +507,11 @@ class EDQMDownloader:
         if match:
             return html.unescape(re.sub(r"\s+", " ", match.group(1)).strip())
 
+        return ""
+
+    def get_detail_url(self, product_code: str) -> str:
+        if self._ensure_current_product(product_code) and self._current:
+            return self._current.detail_url or ""
         return ""
 
     def _extract_detail_href(self, html_text: str, product_code: str) -> str:

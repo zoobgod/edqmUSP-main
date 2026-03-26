@@ -42,6 +42,7 @@ class ProductMatch:
     product_code: str
     name: str
     source: str = "USP"
+    metadata: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -240,7 +241,24 @@ class USPDownloader:
                 if not code or code in seen:
                     continue
                 seen.add(code)
-                matches.append(ProductMatch(query=term, product_code=code, name=name or code))
+                matches.append(
+                    ProductMatch(
+                        query=term,
+                        product_code=code,
+                        name=name or code,
+                        metadata={
+                            "price": self._first_attr_value(attrs, "product.listPrice"),
+                            "current_lot": self._first_attr_value(attrs, "USPProductType.usp_current_lot_number"),
+                            "in_stock": self._first_attr_value(attrs, "USPProductType.usp_in_stock"),
+                            "ready_to_ship": self._first_attr_value(attrs, "USPProductType.usp_ready_to_ship"),
+                            "packing_size": self._first_attr_value(attrs, "USPProductType.usp_packing_size"),
+                            "uom": self._first_attr_value(attrs, "USPProductType.usp_uom"),
+                            "cas": self._first_attr_value(attrs, "USPProductType.usp_cas_number"),
+                            "molecular_formula": self._first_attr_value(attrs, "USPProductType.usp_molecular_formula"),
+                            "category_type": self._first_attr_value(attrs, "USPProductType.usp_product_category_type"),
+                        },
+                    )
+                )
                 if len(matches) >= limit:
                     return matches
 
@@ -274,6 +292,11 @@ class USPDownloader:
             if lot.lot_number:
                 return lot.lot_number
 
+        return ""
+
+    def get_detail_url(self, product_code: str) -> str:
+        if self._ensure_current_product(product_code) and self._current_product:
+            return urljoin(USP_BASE_URL, self._current_product.route or "")
         return ""
 
     def _fetch_product(self, product_code: str) -> USPProduct | None:

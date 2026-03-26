@@ -15,9 +15,18 @@ class ApiRouteTests(unittest.TestCase):
         fake_rows = [
             {
                 "query": "Raltegravir Impurity E RS / Ралтегравир примесь E CO (EDQM)",
+                "matched_on": "Raltegravir Impurity E",
+                "match_type": "Normalized",
+                "rank": "1",
                 "source": "EDQM",
                 "code": "Y0001949",
                 "name": "RALTEGRAVIR IMPURITY E CRS",
+                "enrichment": {
+                    "availability": "Available",
+                    "price": "90 EUR",
+                    "current_batch": "2",
+                    "unit_quantity": "10 MG",
+                },
             }
         ]
 
@@ -30,6 +39,9 @@ class ApiRouteTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Y0001949", resp.text)
         self.assertIn("Copy Catalogue Numbers", resp.text)
+        self.assertIn("Matched On", resp.text)
+        self.assertIn("Normalized", resp.text)
+        self.assertIn("View details", resp.text)
 
     def test_download_post_renders_summary_page(self):
         fake_result = {
@@ -97,6 +109,16 @@ class ApiRouteTests(unittest.TestCase):
                 "name": "IBUPROFEN CRS",
                 "batch_number": "6",
                 "status": "OK",
+                "summary": {
+                    "current_batch": "6",
+                    "availability": "Available",
+                    "price": "90 EUR",
+                    "storage": "+5°C+/-3°C",
+                    "dispatching": "Ambient temp.",
+                },
+                "detail_url": "https://crs.edqm.eu/db/4DCGI/View=I0020000",
+                "actionability": "Current",
+                "actionability_class": "ok",
             }
         ]
 
@@ -111,6 +133,8 @@ class ApiRouteTests(unittest.TestCase):
         self.assertIn("Copy Batch Numbers", resp.text)
         self.assertIn("IBUPROFEN CRS", resp.text)
         self.assertIn("6", resp.text)
+        self.assertIn("Availability", resp.text)
+        self.assertIn("Open", resp.text)
 
 
 if __name__ == "__main__":
