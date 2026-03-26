@@ -37,6 +37,8 @@ def _init_state():
 
 _init_state()
 
+download_dir = str(DOWNLOAD_DIR)
+
 with st.sidebar:
     st.info("EDQM and USP downloads use public URLs. Login credentials are not required.")
     with st.expander("Configuration", expanded=False):
@@ -128,7 +130,7 @@ def _download_documents(source: str, codes: list[str], doc_types: list[str], bas
                     st.markdown(f"**{bundle_name}**")
                     st.caption(f"Catalogue: {code}")
 
-                    cols = st.columns(5)
+                    cols = st.columns(4)
                     for idx, doc in enumerate(("COA", "MSDS", "COO")):
                         file_path = files_by_doc.get(doc)
                         if not file_path or not file_path.exists():
@@ -153,7 +155,6 @@ def _download_documents(source: str, codes: list[str], doc_types: list[str], bas
                         mime="application/zip",
                         key=f"zip-{source}-{batch_id}-{code}",
                     )
-                    cols[4].write("")
     finally:
         downloader.stop()
 

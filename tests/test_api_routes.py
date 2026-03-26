@@ -80,7 +80,7 @@ class ApiRouteTests(unittest.TestCase):
         self.assertIn("Download Batch ZIP", resp.text)
         self.assertIn("Download Summary", resp.text)
         self.assertIn("G0400006", resp.text)
-        self.assertIn("page=download-file", resp.text)
+        self.assertIn("/download-file", resp.text)
 
     def test_download_file_route_returns_zip(self):
         fake_result = {

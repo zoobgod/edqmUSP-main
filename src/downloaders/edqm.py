@@ -19,7 +19,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from src.config import DOWNLOAD_DIR, EDQM_PASSWORD, EDQM_USERNAME, HEADLESS
+from src.config import DOWNLOAD_DIR, HEADLESS
 
 try:
     from pypdf import PdfReader
@@ -71,8 +71,6 @@ class ProductContext:
 
 @dataclass
 class EDQMDownloader:
-    username: str = field(default_factory=lambda: EDQM_USERNAME)
-    password: str = field(default_factory=lambda: EDQM_PASSWORD)
     download_dir: Path = field(default_factory=lambda: DOWNLOAD_DIR)
     headless: bool = field(default_factory=lambda: HEADLESS)
 

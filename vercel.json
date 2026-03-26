@@ -18,6 +18,10 @@
       "destination": "/api/index.py?page=batches"
     },
     {
+      "source": "/download-file",
+      "destination": "/api/index.py?page=download-file"
+    },
+    {
       "source": "/health",
       "destination": "/api/index.py?page=health"
     }

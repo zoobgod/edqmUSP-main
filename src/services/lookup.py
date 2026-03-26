@@ -25,14 +25,18 @@ def strip_lookup_suffix_tokens(value: str) -> str:
 def strip_lookup_quantity_tokens(value: str) -> str:
     text = value or ""
     text = re.sub(
-        r"\b\d+(?:[.,]\d+)?\s*(?:mg|g|kg|mcg|ug|ml|l|mmol|mol|ppm|%)\b",
+        r"\b\d+(?:[.,]\d+)?\s*(?:mg|g|kg|mcg|ug|μg|ml|l|mmol|mol|ppm|%)\b",
         " ",
         text,
         flags=re.IGNORECASE,
     )
-    text = re.sub(r"\b\d+(?:[.,]\d+)?\b", " ", text)
-    text = re.sub(r"\s+", " ", text).strip(" \t\r\n-_/|,;")
-    return text
+    # Only strip standalone numbers if the result still contains alphabetic content
+    candidate = re.sub(r"\b\d+(?:[.,]\d+)?\b", " ", text)
+    candidate = re.sub(r"\s+", " ", candidate).strip(" \t\r\n-_/|,;")
+    if candidate:
+        return candidate
+    # If stripping numbers removes everything, return the quantity-only stripped version
+    return re.sub(r"\s+", " ", text).strip(" \t\r\n-_/|,;")
 
 
 def prefix_lookup_candidates(value: str, min_words: int = 2, max_words: int = 5) -> list[str]:

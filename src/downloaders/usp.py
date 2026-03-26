@@ -15,7 +15,7 @@ from urllib.parse import urljoin
 
 import requests
 
-from src.config import DOWNLOAD_DIR, HEADLESS, USP_PASSWORD, USP_USERNAME
+from src.config import DOWNLOAD_DIR, HEADLESS
 
 logger = logging.getLogger(__name__)
 
@@ -72,8 +72,6 @@ class USPProduct:
 
 @dataclass
 class USPDownloader:
-    username: str = field(default_factory=lambda: USP_USERNAME)
-    password: str = field(default_factory=lambda: USP_PASSWORD)
     download_dir: Path = field(default_factory=lambda: DOWNLOAD_DIR)
     headless: bool = field(default_factory=lambda: HEADLESS)
 

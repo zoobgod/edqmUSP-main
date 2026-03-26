@@ -22,13 +22,7 @@ def _read_token_file() -> str:
 YDISK_TOKEN = os.getenv("YDISK_TOKEN") or _read_token_file()
 YDISK_UPLOAD_PATH = os.getenv("YDISK_UPLOAD_PATH", "/edqmUSP")
 
-# EDQM
-EDQM_USERNAME = os.getenv("EDQM_USERNAME", "")
-EDQM_PASSWORD = os.getenv("EDQM_PASSWORD", "")
-
-# USP
-USP_USERNAME = os.getenv("USP_USERNAME", "")
-USP_PASSWORD = os.getenv("USP_PASSWORD", "")
+# EDQM and USP downloads are public; no credentials needed.
 
 # Local
 def _resolve_download_dir(create: bool = True) -> Path:

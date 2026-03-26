@@ -7,7 +7,7 @@ import re
 import sys
 import time
 import zipfile
-from datetime import datetime
+from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -24,21 +24,23 @@ except Exception:  # pragma: no cover
     if str(PROJECT_ROOT) not in sys.path:
         sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.services.bundles import (
+    build_batch_zip as _svc_build_batch_zip,
+    build_position_zip as _svc_build_position_zip,
+    bundle_name as _svc_bundle_name,
+    resolve_position_name as _svc_resolve_position_name,
+    safe_file_part as _svc_safe_file_part,
+    zip_member_name as _svc_zip_member_name,
+)
+from src.services.lookup import (
+    lookup_query_candidates as _svc_lookup_query_candidates,
+    search_lookup_candidates as _svc_search_lookup_candidates,
+)
+
 app = FastAPI(title="edqmUSP")
 DOWNLOAD_CACHE_TTL_SECONDS = 900
+DOWNLOAD_CACHE_MAX_ENTRIES = 20
 _DOWNLOAD_CACHE: dict[str, dict[str, object]] = {}
-
-# Optional shared services. If another worker extracts helpers into src/services,
-# this frontend will adopt them automatically without changing route behavior.
-try:
-    from src.services import bundles as _bundles_service
-except Exception:  # pragma: no cover
-    _bundles_service = None
-
-try:
-    from src.services import lookup as _lookup_service
-except Exception:  # pragma: no cover
-    _lookup_service = None
 
 APP_CSS = """
 <style>
@@ -51,11 +53,11 @@ APP_CSS = """
   --card: rgba(255, 255, 255, 0.86);
   --line: rgba(45, 70, 107, 0.18);
   --line-strong: rgba(45, 70, 107, 0.34);
-  --teal: #1f58c3;
-  --teal-2: #2d7cff;
-  --teal-soft: rgba(45, 124, 255, 0.14);
-  --bronze: #0f1729;
-  --bronze-2: #243a63;
+  --primary: #1f58c3;
+  --primary-light: #2d7cff;
+  --primary-soft: rgba(45, 124, 255, 0.14);
+  --dark: #0f1729;
+  --dark-2: #243a63;
   --rose: #d1495b;
   --shadow: 0 24px 64px rgba(15, 29, 62, 0.14);
   --shadow-soft: 0 10px 30px rgba(15, 29, 62, 0.09);
@@ -125,7 +127,7 @@ body::before {
   font-family: "Fraunces", Georgia, serif;
   font-size: 1.35rem;
   font-weight: 700;
-  background: linear-gradient(135deg, var(--teal), var(--teal-2));
+  background: linear-gradient(135deg, var(--primary), var(--primary-light));
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.25);
 }
 .brand-copy {
@@ -165,7 +167,7 @@ body::before {
   background: rgba(255,255,255,0.14);
 }
 .nav a.active {
-  background: linear-gradient(135deg, var(--teal), var(--teal-2));
+  background: linear-gradient(135deg, var(--primary), var(--primary-light));
   color: #fff;
   border-color: transparent;
 }
@@ -229,7 +231,7 @@ a {
 .hero-grid {
   position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
+  grid-template-columns: minmax(0, 1.2fr) minmax(220px, 0.8fr);
   gap: 22px;
   align-items: start;
 }
@@ -246,7 +248,7 @@ a {
   border-radius: 999px;
   border: 1px solid rgba(13, 92, 99, 0.16);
   background: rgba(13, 92, 99, 0.08);
-  color: var(--teal);
+  color: var(--primary);
   font-size: 0.82rem;
   font-weight: 800;
   letter-spacing: 0.06em;
@@ -257,7 +259,7 @@ a {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: linear-gradient(135deg, var(--teal-2), var(--bronze-2));
+  background: linear-gradient(135deg, var(--primary-light), var(--dark-2));
 }
 .lede {
   max-width: 760px;
@@ -354,7 +356,7 @@ a {
 }
 .button, button {
   display: inline-block;
-  background: linear-gradient(135deg, var(--teal), var(--teal-2));
+  background: linear-gradient(135deg, var(--primary), var(--primary-light));
   color: #fff;
   border: 0;
   border-radius: 16px;
@@ -373,7 +375,7 @@ a {
   box-shadow: 0 14px 28px rgba(13, 92, 99, 0.22);
 }
 .button.secondary, button.secondary {
-  background: linear-gradient(135deg, var(--bronze), var(--bronze-2));
+  background: linear-gradient(135deg, var(--dark), var(--dark-2));
   box-shadow: 0 10px 24px rgba(166, 106, 43, 0.18);
 }
 .button.ghost {
@@ -461,7 +463,7 @@ textarea {
   background: #fff;
 }
 .checks input {
-  accent-color: var(--teal);
+  accent-color: var(--primary);
 }
 .table-wrap {
   overflow-x: auto;
@@ -502,7 +504,7 @@ textarea {
 .lookup-details summary {
   cursor: pointer;
   font-weight: 700;
-  color: var(--teal);
+  color: var(--primary);
 }
 .lookup-detail-grid {
   display: grid;
@@ -709,7 +711,7 @@ tbody tr:hover td {
   background: rgba(209, 73, 91, 0.08);
 }
 .table-link {
-  color: var(--teal);
+  color: var(--primary);
   font-weight: 700;
   text-decoration: none;
 }
@@ -784,31 +786,56 @@ pre {
   .hero-grid, .form-grid {
     grid-template-columns: 1fr;
   }
+  .topbar { flex-wrap: wrap; }
 }
 </style>
 """
 
 APP_SCRIPT = """
 <script>
-function copyFromTextarea(id) {
-  const el = document.getElementById(id);
-  if (!el) return;
+function showCopyFeedback(el, success) {
+  el.style.borderColor = success ? '#1f58c3' : '#d1495b';
+  setTimeout(function() { el.style.borderColor = ''; }, 600);
+}
+function legacyCopy(el) {
   el.focus();
   el.select();
   el.setSelectionRange(0, el.value.length);
+  var ok = document.execCommand('copy');
+  showCopyFeedback(el, ok);
+}
+function copyFromTextarea(id) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  var text = el.value;
   if (navigator.clipboard && window.isSecureContext) {
-    navigator.clipboard.writeText(el.value).catch(() => document.execCommand('copy'));
+    navigator.clipboard.writeText(text).then(
+      function() { showCopyFeedback(el, true); },
+      function() { legacyCopy(el); }
+    );
     return;
   }
-  document.execCommand('copy');
+  legacyCopy(el);
 }
 function scrollToResult(id) {
-  const el = document.getElementById(id);
+  var el = document.getElementById(id);
   if (!el) return;
-  window.requestAnimationFrame(() => {
+  window.requestAnimationFrame(function() {
     el.scrollIntoView({ behavior: 'smooth', block: 'start' });
   });
 }
+document.addEventListener('DOMContentLoaded', function() {
+  document.querySelectorAll('form').forEach(function(form) {
+    form.addEventListener('submit', function() {
+      var btn = form.querySelector('button[type="submit"]');
+      if (btn && !btn.disabled) {
+        btn.disabled = true;
+        btn.dataset.originalText = btn.textContent;
+        btn.textContent = 'Processing\u2026';
+      }
+    });
+  });
+});
 </script>
 """
 
@@ -830,6 +857,8 @@ def _page(title: str, body: str, active: str = "") -> HTMLResponse:
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Automated EDQM and USP document retrieval — COA, MSDS, COO downloads and catalogue lookup.">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>V</text></svg>">
     <title>{html.escape(title)}</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -878,6 +907,10 @@ def _prune_download_cache() -> None:
 
 def _store_download_payload(filename: str, data: bytes) -> str:
     _prune_download_cache()
+    # Evict oldest entries if at capacity
+    while len(_DOWNLOAD_CACHE) >= DOWNLOAD_CACHE_MAX_ENTRIES:
+        oldest = min(_DOWNLOAD_CACHE, key=lambda k: float(_DOWNLOAD_CACHE[k].get("created_at", 0)))
+        _DOWNLOAD_CACHE.pop(oldest, None)
     token = uuid4().hex
     _DOWNLOAD_CACHE[token] = {
         "filename": filename,
@@ -895,14 +928,12 @@ def _get_download_payload(token: str) -> tuple[str, bytes] | None:
     return str(payload["filename"]), bytes(payload["data"])
 
 
-def _service_call(module, names: tuple[str, ...], *args, **kwargs):
-    if module is None:
-        return None
-    for name in names:
-        fn = getattr(module, name, None)
-        if callable(fn):
-            return fn(*args, **kwargs)
-    return None
+def _safe_href(url: str) -> str:
+    """Validate and escape a URL for use in href attributes (prevent javascript: XSS)."""
+    escaped = html.escape(url or "")
+    if escaped and not escaped.startswith(("https://", "http://")):
+        return ""
+    return escaped
 
 
 def _parse_vercel_form(raw_body: bytes) -> dict[str, list[str]]:
@@ -919,119 +950,16 @@ def _parse_lines(raw: str) -> list[str]:
 
 
 def _clean_lookup_fragment(value: str) -> str:
-    text = html.unescape(value or "")
-    text = re.sub(r"\([^)]*(?:edqm|usp)[^)]*\)", " ", text, flags=re.IGNORECASE)
-    text = re.sub(r"\[[^\]]*(?:edqm|usp)[^\]]*\]", " ", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s*[-|]\s*(?:edqm|usp)\s*$", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s+", " ", text).strip(" \t\r\n-_/|,;")
-    return text
-
-
-def _strip_lookup_suffix_tokens(value: str) -> str:
-    tokens = [token for token in re.split(r"\s+", value or "") if token]
-    while tokens and tokens[-1].rstrip(".,").upper() in {"RS", "CRS"}:
-        tokens.pop()
-    return " ".join(tokens).strip()
-
-
-def _strip_lookup_quantity_tokens(value: str) -> str:
-    text = value or ""
-    text = re.sub(
-        r"\b\d+(?:[.,]\d+)?\s*(?:mg|g|kg|mcg|ug|μg|ml|l|mmol|mol|ppm|%)\b",
-        " ",
-        text,
-        flags=re.IGNORECASE,
-    )
-    text = re.sub(r"\b\d+(?:[.,]\d+)?\b", " ", text)
-    text = re.sub(r"\s+", " ", text).strip(" \t\r\n-_/|,;")
-    return text
-
-
-def _prefix_lookup_candidates(value: str, min_words: int = 2, max_words: int = 5) -> list[str]:
-    words = [word for word in re.split(r"\s+", value or "") if word]
-    if len(words) < min_words:
-        return []
-
-    upper_bound = min(len(words), max_words)
-    prefixes: list[str] = []
-    for size in range(upper_bound, min_words - 1, -1):
-        prefix = " ".join(words[:size]).strip()
-        if prefix and prefix not in prefixes:
-            prefixes.append(prefix)
-    return prefixes
+    from src.services.lookup import clean_lookup_fragment
+    return clean_lookup_fragment(value)
 
 
 def _lookup_query_candidates(raw_query: str) -> list[str]:
-    shared = _service_call(
-        _lookup_service,
-        (
-            "lookup_query_candidates",
-            "build_lookup_candidates",
-            "generate_lookup_candidates",
-        ),
-        raw_query,
-    )
-    if isinstance(shared, list):
-        return [str(item) for item in shared if str(item).strip()]
-
-    base = _clean_lookup_fragment(raw_query)
-    if not base:
-        return []
-
-    split_parts = re.split(r"\s*[/|;]\s*", base)
-    candidates: list[str] = []
-
-    def add(value: str):
-        cleaned = _clean_lookup_fragment(value)
-        if cleaned and cleaned not in candidates:
-            candidates.append(cleaned)
-        stripped = _strip_lookup_suffix_tokens(cleaned)
-        if stripped and stripped not in candidates:
-            candidates.append(stripped)
-        quantity_stripped = _strip_lookup_quantity_tokens(stripped or cleaned)
-        if quantity_stripped and quantity_stripped not in candidates:
-            candidates.append(quantity_stripped)
-        for prefix in _prefix_lookup_candidates(quantity_stripped or stripped or cleaned):
-            if prefix not in candidates:
-                candidates.append(prefix)
-
-    latin_parts = [part for part in split_parts if re.search(r"[A-Za-z]", part or "")]
-    for part in latin_parts:
-        add(part)
-
-    add(base)
-
-    for part in split_parts:
-        add(part)
-
-    if not candidates:
-        add(raw_query)
-
-    return candidates
+    return _svc_lookup_query_candidates(raw_query)
 
 
 def _search_lookup_candidates(downloader, raw_query: str, limit: int = 8) -> tuple[list, str]:
-    shared = _service_call(
-        _lookup_service,
-        (
-            "search_lookup_candidates",
-            "search_candidates",
-        ),
-        downloader,
-        raw_query,
-        limit,
-    )
-    if isinstance(shared, tuple) and len(shared) == 2:
-        return shared
-
-    attempted: list[str] = []
-    for candidate in _lookup_query_candidates(raw_query):
-        attempted.append(candidate)
-        matches = downloader.search_products_by_name(candidate, limit=limit)
-        if matches:
-            return matches, candidate
-    fallback = attempted[0] if attempted else raw_query.strip()
-    return [], fallback
+    return _svc_search_lookup_candidates(downloader, raw_query, limit)
 
 
 def _compact_lookup_value(value: str) -> str:
@@ -1151,62 +1079,15 @@ def _batch_actionability(source: str, summary: dict[str, str]) -> tuple[str, str
 
 
 def _bundle_name(source: str, code: str, position_name: str) -> str:
-    shared = _service_call(
-        _bundles_service,
-        (
-            "bundle_name",
-            "build_bundle_name",
-        ),
-        source,
-        code,
-        position_name,
-    )
-    if isinstance(shared, str) and shared.strip():
-        return shared
-    return f"{source.upper()}_{code}_{position_name}".strip()
+    return _svc_bundle_name(source, code, position_name)
 
 
-def _zip_member_name(bundle_name: str, doc_type: str, file_path: Path) -> str:
-    shared = _service_call(
-        _bundles_service,
-        (
-            "zip_member_name",
-            "build_zip_member_name",
-        ),
-        bundle_name,
-        doc_type,
-        file_path,
-    )
-    if isinstance(shared, str) and shared.strip():
-        return shared
-    if doc_type == "COO":
-        return file_path.name
-    suffix = file_path.suffix.lower() or ".pdf"
-    return f"{_safe_filename(bundle_name)}_{doc_type}{suffix}"
+def _zip_member_name(bundle: str, doc_type: str, file_path: Path) -> str:
+    return _svc_zip_member_name(bundle, doc_type, file_path)
 
 
-def _build_position_zip(bundle_name: str, files_by_doc: dict[str, Path]) -> bytes:
-    shared = _service_call(
-        _bundles_service,
-        (
-            "build_position_zip",
-            "position_zip_bytes",
-        ),
-        bundle_name,
-        files_by_doc,
-    )
-    if isinstance(shared, (bytes, bytearray)):
-        return bytes(shared)
-
-    buffer = BytesIO()
-    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for doc_type in ("COA", "MSDS", "COO"):
-            file_path = files_by_doc.get(doc_type)
-            if not file_path or not file_path.exists():
-                continue
-            archive.writestr(_zip_member_name(bundle_name, doc_type, file_path), file_path.read_bytes())
-    buffer.seek(0)
-    return buffer.getvalue()
+def _build_position_zip(bundle: str, files_by_doc: dict[str, Path]) -> bytes:
+    return _svc_build_position_zip(bundle, files_by_doc)
 
 
 def _build_batch_zip(
@@ -1215,58 +1096,11 @@ def _build_batch_zip(
     position_names: dict[str, str],
     manifest_text: str,
 ) -> bytes:
-    shared = _service_call(
-        _bundles_service,
-        (
-            "build_batch_zip",
-            "batch_zip_bytes",
-        ),
-        source,
-        successful_files,
-        position_names,
-        manifest_text,
-    )
-    if isinstance(shared, (bytes, bytearray)):
-        return bytes(shared)
-
-    buffer = BytesIO()
-    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for code, files_by_doc in successful_files.items():
-            position_name = position_names.get(code, code)
-            bundle_name = _bundle_name(source, code, position_name)
-            folder_name = _safe_filename(bundle_name)
-            for doc_type in ("COA", "MSDS", "COO"):
-                file_path = files_by_doc.get(doc_type)
-                if not file_path or not file_path.exists():
-                    continue
-                archive.writestr(f"{folder_name}/{_zip_member_name(bundle_name, doc_type, file_path)}", file_path.read_bytes())
-        archive.writestr("manifest.txt", manifest_text)
-    buffer.seek(0)
-    return buffer.getvalue()
+    return _svc_build_batch_zip(source, successful_files, position_names, manifest_text)
 
 
 def _resolve_position_name(downloader, code: str) -> str:
-    shared = _service_call(
-        _bundles_service,
-        (
-            "resolve_position_name",
-            "get_position_name",
-        ),
-        downloader,
-        code,
-    )
-    if isinstance(shared, str) and shared.strip():
-        return shared
-
-    getter = getattr(downloader, "get_position_name", None)
-    if callable(getter):
-        try:
-            name = (getter(code) or "").strip()
-            if name:
-                return name
-        except Exception:
-            return code
-    return code
+    return _svc_resolve_position_name(downloader, code)
 
 
 def _doc_status(result) -> str:
@@ -1390,10 +1224,6 @@ def _usp_product_summary(downloader) -> dict[str, str]:
     }
 
 
-def _storage_suffix(summary: dict[str, str]) -> str:
-    return ""
-
-
 def _download_batch(source: str, codes: list[str], doc_types: list[str]) -> dict[str, object]:
     if source == "edqm":
         from src.downloaders.edqm import EDQMDownloader as DownloaderCls
@@ -1403,7 +1233,7 @@ def _download_batch(source: str, codes: list[str], doc_types: list[str]) -> dict
     successful_files: dict[str, dict[str, Path]] = {}
     position_names: dict[str, str] = {}
     manifest_lines: list[str] = [
-        f"Batch generated: {datetime.utcnow().isoformat()}Z",
+        f"Batch generated: {datetime.now(timezone.utc).isoformat()}",
         f"Source: {source.upper()}",
         f"Requested document types: {', '.join(doc_types)}",
         "",
@@ -1433,7 +1263,7 @@ def _download_batch(source: str, codes: list[str], doc_types: list[str]) -> dict
                         position_name = str(summary["name"])
                     row["name"] = position_name
                     row["summary"] = summary
-                    position_names[code] = position_name + _storage_suffix(summary)
+                    position_names[code] = position_name
                     timeline = [
                         {"label": "Search", "status": "ok"},
                         {"label": "Metadata", "status": "ok"},
@@ -1645,7 +1475,7 @@ def _download_form(
     note = f'<p class="note">{_safe_text(message)}</p>' if message else ""
     return f"""
 <section class="surface">
-  <form method="post" action="/api/index.py?page=download" class="panel section-stack">
+  <form method="post" action="/download" class="panel section-stack">
       <div>
         <h2>Download Documents</h2>
         <p class="muted">Paste catalogue codes, choose documents, then review the summary below.</p>
@@ -1764,7 +1594,7 @@ def _render_download_results(
     if download_token:
         hidden_fields.append(f'<input type="hidden" name="token" value="{_safe_text(download_token)}">')
     action_html = (
-        '<form method="post" action="/api/index.py?page=download-file" style="margin:0;">'
+        '<form method="post" action="/download-file" style="margin:0;">'
         + "".join(hidden_fields)
         + '<button type="submit">Download Batch ZIP</button>'
         + '</form>'
@@ -1779,6 +1609,7 @@ def _render_download_results(
         '<div><h3>Download Result</h3><p class="muted">One ZIP at the top level. Each position is a folder inside the archive.</p></div>'
         f'<div style="display:flex; gap:10px; flex-wrap:wrap;">{action_html}<span class="status-pill">{position_count} positions packaged</span></div>'
         '</div>'
+        '<div class="microcopy">The download link expires after 15 minutes or if the server restarts. If the download fails, re-submit the form.</div>'
         + '</section>'
         + _render_download_summary_table(source, rows, doc_types)
         + f'<section class="manifest-panel"><h3>Batch Manifest</h3><pre>{_safe_text(manifest_text)}</pre></section>'
@@ -1789,7 +1620,7 @@ def _lookup_form(source: str = "both", names: str = "", table_html: str = "", me
     note = f'<p class="note">{_safe_text(message)}</p>' if message else ""
     return f"""
 <section class="surface">
-    <form method="post" action="/api/index.py?page=lookup" class="panel section-stack">
+    <form method="post" action="/lookup" class="panel section-stack">
       <div>
         <h2>Find Catalogue Numbers</h2>
         <p class="muted">Paste product names line by line and review matches directly below.</p>
@@ -1823,7 +1654,7 @@ def _batch_lookup_form(source: str = "edqm", codes: str = "", table_html: str = 
     note = f'<p class="note">{_safe_text(message)}</p>' if message else ""
     return f"""
 <section class="surface">
-    <form method="post" action="/api/index.py?page=batches" class="panel section-stack">
+    <form method="post" action="/batches" class="panel section-stack">
       <div>
         <h2>Current Batch Numbers</h2>
         <p class="muted">Paste catalogue codes line by line and review current batch values below.</p>
@@ -1982,7 +1813,8 @@ def _batch_results_table(rows: list[dict[str, str]]) -> str:
     for row in rows:
         summary = row.get("summary", {}) if isinstance(row.get("summary", {}), dict) else {}
         detail_url = str(row.get("detail_url", "") or "")
-        detail_link = f'<a class="table-link" href="{_safe_text(detail_url)}" target="_blank" rel="noreferrer">Open</a>' if detail_url else "—"
+        safe_url = _safe_href(detail_url)
+        detail_link = f'<a class="table-link" href="{safe_url}" target="_blank" rel="noreferrer">Open</a>' if safe_url else "—"
         actionability = str(row.get("actionability", "") or row.get("status", ""))
         action_class = str(row.get("actionability_class", "fail"))
 
@@ -2186,7 +2018,9 @@ async def _handle_vercel_entry(request: Request):
     page = (request.query_params.get("page") or "home").lower()
     path = request.url.path.rstrip("/")
 
-    if path.endswith("/download"):
+    if path.endswith("/download-file"):
+        page = "download-file"
+    elif path.endswith("/download"):
         page = "download"
     elif path.endswith("/lookup"):
         page = "lookup"
@@ -2260,7 +2094,7 @@ def download_documents(
     if source not in {"edqm", "usp"}:
         return _page(
             "Download Documents",
-            _download_form(source="edqm", codes=codes, message="Invalid source.", selected_docs=clean_doc_types),
+            _download_form(source="edqm", codes=codes, message="Select a valid source (EDQM or USP).", selected_docs=clean_doc_types),
             active="download",
         )
     if not clean_codes:
@@ -2293,7 +2127,7 @@ def download_documents(
     zip_bytes = bytes(batch_result.get("zip_bytes", b""))
     download_token = ""
     if zip_bytes:
-        filename = f"{source.upper()}_BATCH_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{position_count}pos.zip"
+        filename = f"{source.upper()}_BATCH_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{position_count}pos.zip"
         download_token = _store_download_payload(filename, zip_bytes)
     message = "Download complete. Review the summary below and use Download Batch ZIP." if position_count else "No files were downloaded. Review the summary and manifest below."
 
@@ -2347,7 +2181,7 @@ def download_documents_file(
     if not zip_bytes:
         return Response("No files available for ZIP download.", status_code=404, media_type="text/plain")
 
-    filename = f"{source.upper()}_BATCH_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{position_count}pos.zip"
+    filename = f"{source.upper()}_BATCH_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{position_count}pos.zip"
     return StreamingResponse(
         BytesIO(zip_bytes),
         media_type="application/zip",
@@ -2406,7 +2240,7 @@ def current_batch_lookup(
     if source not in {"edqm", "usp"}:
         return _page(
             "Current Batch Numbers",
-            _batch_lookup_form(source="edqm", codes=codes, message="Invalid source."),
+            _batch_lookup_form(source="edqm", codes=codes, message="Select a valid source (EDQM or USP)."),
             active="batches",
         )
 
