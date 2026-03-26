@@ -20,6 +20,12 @@ class EDQMDownloaderTests(unittest.TestCase):
         self.assertIn("COA", links)
         self.assertIn("COO", links)
 
+    def test_sigma_candidate_urls_include_supelco_variant(self):
+        urls = EDQMDownloader._sigma_candidate_urls("y0002266")
+
+        self.assertIn("https://www.sigmaaldrich.com/SE/en/product/supelco/y0002266", urls)
+        self.assertIn("https://www.sigmaaldrich.com/SE/en/sds/supelco/y0002266?userType=anonymous", urls)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -383,6 +383,13 @@ class EDQMDownloader:
             SIGMA_SDS_URL_TEMPLATE_US.format(code=sigma_code),
             SIGMA_PRODUCT_URL_TEMPLATE.format(code=sigma_code),
         ]
+
+        for brand in ("supelco",):
+            for region in ("SE", "US"):
+                urls.append(f"https://www.sigmaaldrich.com/{region}/en/sds/{brand}/{sigma_code}")
+                urls.append(f"https://www.sigmaaldrich.com/{region}/en/sds/{brand}/{sigma_code}?userType=anonymous")
+                urls.append(f"https://www.sigmaaldrich.com/{region}/en/product/{brand}/{sigma_code}")
+
         unique: list[str] = []
         for url in urls:
             if url not in unique:
