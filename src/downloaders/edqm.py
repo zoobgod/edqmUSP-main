@@ -588,7 +588,12 @@ class EDQMDownloader:
             if "leaflet" in lower_href or "leaflet" in lower_text:
                 links.setdefault("COA", absolute)
 
-            if "safety data sheet" in lower_text or ("sds" in lower_text and "product code" not in lower_text):
+            if (
+                "safety data sheet" in lower_text
+                or "safety data statement" in lower_text
+                or "sds.edqm.eu" in lower_href
+                or ("sds" in lower_text and "product code" not in lower_text)
+            ):
                 links.setdefault("MSDS", absolute)
 
             if "oofgoods" in lower_href or "origin of goods" in lower_text:
