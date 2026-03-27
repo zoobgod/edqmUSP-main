@@ -33,7 +33,7 @@ def bundle_name(source: str, code: str, position_name: str) -> str:
 def zip_member_name(bundle: str, doc_type: str, file_path: Path) -> str:
     if doc_type == "COO":
         # Keep COO naming as source filename (country-derived PDF/TXT).
-        return file_path.name
+        return re.sub(r"_\d+(\.[^.]+)$", r"\1", file_path.name)
 
     suffix = file_path.suffix.lower() or ".pdf"
     return f"{safe_file_part(bundle)}_{doc_type}{suffix}"

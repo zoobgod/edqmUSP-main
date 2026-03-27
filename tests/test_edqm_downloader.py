@@ -26,6 +26,13 @@ class EDQMDownloaderTests(unittest.TestCase):
         self.assertIn("https://www.sigmaaldrich.com/SE/en/product/supelco/y0002266", urls)
         self.assertIn("https://www.sigmaaldrich.com/SE/en/sds/supelco/y0002266?userType=anonymous", urls)
 
+    def test_country_from_line_tail_skips_false_single_letter_and_material_words(self):
+        downloader = EDQMDownloader()
+
+        self.assertEqual(downloader._country_from_line_tail("Y0001153 1 Human: purified human"), "")
+        self.assertEqual(downloader._country_from_line_tail("immunoglobulins"), "")
+        self.assertEqual(downloader._country_from_line_tail("Great Britain"), "Great Britain")
+
 
 if __name__ == "__main__":
     unittest.main()

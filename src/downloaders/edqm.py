@@ -908,6 +908,10 @@ class EDQMDownloader:
             "serum",
             "urine",
             "blood",
+            "immunoglobulin",
+            "immunoglobulins",
+            "antibody",
+            "antibodies",
             "synthetic",
             "semisynthetic",
             "fermentation",
@@ -931,7 +935,12 @@ class EDQMDownloader:
                 cleaned = self._clean_country_candidate(token)
                 if not cleaned:
                     continue
+                if len(cleaned) <= 1:
+                    continue
                 if cleaned.lower() in stopwords:
+                    continue
+                words = [word.lower() for word in cleaned.split()]
+                if words and all(word in stopwords for word in words):
                     continue
                 return cleaned
 
