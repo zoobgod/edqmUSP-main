@@ -57,11 +57,11 @@ APP_CSS = """
   --card: rgba(255, 255, 255, 0.86);
   --line: rgba(45, 70, 107, 0.18);
   --line-strong: rgba(45, 70, 107, 0.34);
-  --primary: #1f58c3;
-  --primary-light: #2d7cff;
-  --primary-soft: rgba(45, 124, 255, 0.14);
-  --dark: #0f1729;
-  --dark-2: #243a63;
+  --primary: #1b4ed8;
+  --primary-light: #3b82f6;
+  --primary-soft: rgba(59, 130, 246, 0.14);
+  --dark: #111827;
+  --dark-2: #1f2937;
   --rose: #d1495b;
   --shadow: 0 24px 64px rgba(15, 29, 62, 0.14);
   --shadow-soft: 0 10px 30px rgba(15, 29, 62, 0.09);
@@ -108,11 +108,11 @@ body::before {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 14px 18px;
+  padding: 14px 20px;
   margin-bottom: 28px;
-  border: 1px solid var(--line);
+  border: 1px solid rgba(17, 24, 39, 0.08);
   border-radius: 999px;
-  background: linear-gradient(135deg, rgba(13, 23, 43, 0.94), rgba(24, 44, 79, 0.92));
+  background: rgba(255, 255, 255, 0.96);
   backdrop-filter: blur(16px);
   box-shadow: var(--shadow-soft);
 }
@@ -122,17 +122,11 @@ body::before {
   gap: 14px;
 }
 .brand-mark {
-  width: 44px;
-  height: 44px;
-  display: grid;
-  place-items: center;
-  border-radius: 14px;
-  color: #fff;
-  font-family: "Fraunces", Georgia, serif;
-  font-size: 1.35rem;
-  font-weight: 700;
-  background: linear-gradient(135deg, var(--primary), var(--primary-light));
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.25);
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--dark);
+  flex: 0 0 auto;
 }
 .brand-copy {
   display: flex;
@@ -141,11 +135,13 @@ body::before {
 }
 .brand-title {
   font-family: "Fraunces", Georgia, serif;
-  font-size: 1.1rem;
+  font-size: 2rem;
   font-weight: 600;
+  line-height: 1;
+  color: var(--dark);
 }
 .brand-subtitle {
-  color: rgba(210, 223, 247, 0.86);
+  color: var(--muted);
   font-size: 0.82rem;
   letter-spacing: 0.03em;
   text-transform: uppercase;
@@ -157,21 +153,21 @@ body::before {
   justify-content: flex-end;
 }
 .nav a {
-  color: #e8f1ff;
+  color: var(--dark);
   text-decoration: none;
   padding: 10px 16px;
-  border: 1px solid rgba(146, 176, 228, 0.22);
+  border: 1px solid rgba(17, 24, 39, 0.08);
   border-radius: 999px;
-  background: rgba(255,255,255,0.06);
+  background: rgba(243, 244, 246, 0.9);
   transition: transform 160ms ease, border-color 160ms ease, background 160ms ease, color 160ms ease;
 }
 .nav a:hover {
   transform: translateY(-1px);
-  border-color: rgba(146, 176, 228, 0.48);
-  background: rgba(255,255,255,0.14);
+  border-color: rgba(17, 24, 39, 0.14);
+  background: #ffffff;
 }
 .nav a.active {
-  background: linear-gradient(135deg, var(--primary), var(--primary-light));
+  background: var(--dark);
   color: #fff;
   border-color: transparent;
 }
@@ -352,11 +348,39 @@ a {
   background: var(--card);
   box-shadow: var(--shadow-soft);
   transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
 }
 .card:hover {
   transform: translateY(-3px);
   box-shadow: 0 16px 36px rgba(50, 35, 20, 0.10);
   border-color: var(--line-strong);
+}
+.card > .button,
+.card > .button.secondary,
+.card > .button.ghost {
+  margin-top: auto;
+  align-self: flex-start;
+}
+.card .feature-list {
+  display: grid;
+  gap: 10px;
+  margin: 16px 0 24px;
+}
+.landing-shell {
+  padding: 10px 0 0;
+}
+.landing-heading {
+  margin: 0 0 18px;
+}
+.landing-heading h1 {
+  font-size: clamp(2rem, 4vw, 3rem);
+  color: var(--dark);
+}
+.landing-heading p {
+  margin-top: 8px;
+  color: var(--muted);
 }
 .button, button {
   display: inline-block;
@@ -783,6 +807,7 @@ pre {
     flex-direction: column;
   }
   .nav { justify-content: flex-start; }
+  .brand-title { font-size: 1.5rem; }
   .hero-shell, .surface, .card, .panel, .hero-aside, .table-panel, .manifest-panel { padding: 18px; }
   h1 { font-size: clamp(2.2rem, 12vw, 3.4rem); }
 }
@@ -862,7 +887,7 @@ def _page(title: str, body: str, active: str = "") -> HTMLResponse:
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="description" content="Automated EDQM and USP document retrieval — COA, MSDS, COO downloads and catalogue lookup.">
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>V</text></svg>">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='34' fill='%23111827'/></svg>">
     <title>{html.escape(title)}</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -874,7 +899,7 @@ def _page(title: str, body: str, active: str = "") -> HTMLResponse:
     <main class="page">
       <header class="topbar">
         <div class="brand">
-          <div class="brand-mark">V</div>
+          <div class="brand-mark" aria-hidden="true"></div>
           <div class="brand-copy">
             <div class="brand-title">edqmUSP</div>
             <div class="brand-subtitle">Instant regulatory document access</div>
@@ -1960,61 +1985,16 @@ def _batch_results_table(rows: list[dict[str, str]]) -> str:
 @app.get("/", response_class=HTMLResponse)
 def landing_page() -> HTMLResponse:
     body = """
-<section class="hero-shell">
-  <div class="hero-grid">
-    <div class="hero-copy">
-      <span class="eyebrow">edqmUSP</span>
-      <h1>Three focused workflows.</h1>
-      <p class="lede">Use lookup for names, download for documents, and batches for current batch numbers.</p>
-      <div class="task-strip">
-        <span class="task-pill"><b>Lookup</b> Names -> Codes</span>
-        <span class="task-pill"><b>Download</b> Codes -> Documents</span>
-        <span class="task-pill"><b>Batches</b> Codes -> Current Batch</span>
-      </div>
-      <div class="hero-actions">
-        <a class="button" href="/download">Open Downloader</a>
-        <a class="button ghost" href="/lookup">Find Catalogue Numbers</a>
-        <a class="button secondary" href="/batches">Open Batch Lookup</a>
-      </div>
-      <div class="hero-stats">
-        <div class="grid">
-          <div class="stat">
-            <span class="stat-value">EDQM + USP</span>
-            <span class="stat-label">Both public sources supported</span>
-          </div>
-          <div class="stat">
-            <span class="stat-value">Bulk input</span>
-            <span class="stat-label">One line per name or code</span>
-          </div>
-          <div class="stat">
-            <span class="stat-value">Copy-ready output</span>
-            <span class="stat-label">Column copy and TSV copy for fast handoff</span>
-          </div>
-          <div class="stat">
-            <span class="stat-value">Current batches</span>
-            <span class="stat-label">EDQM batch and USP current lot lookup</span>
-          </div>
-        </div>
-      </div>
-    </div>
-    <aside class="hero-aside">
-      <h3>Execution model</h3>
-      <ul>
-        <li>No auth flow for EDQM/USP public endpoints.</li>
-        <li>Download step returns one batch ZIP.</li>
-        <li>Lookup step tolerates noisy input lines.</li>
-        <li>Batch step returns the current EDQM or USP batch value.</li>
-      </ul>
-    </aside>
+<section class="surface landing-shell">
+  <div class="landing-heading">
+    <h1>Choose a function.</h1>
+    <p>Open the workflow you need.</p>
   </div>
-</section>
-
-<section class="surface">
   <div class="grid">
     <section class="card">
       <h2>Download Documents</h2>
       <p class="muted">Use when you already have catalogue numbers.</p>
-      <ul class="feature-list" style="display:grid; gap:10px; margin:16px 0 18px;">
+      <ul class="feature-list">
         <li>Choose COA, MSDS, COO.</li>
         <li>One batch ZIP with one folder per position.</li>
         <li>Manifest for missing documents.</li>
@@ -2024,7 +2004,7 @@ def landing_page() -> HTMLResponse:
     <section class="card">
       <h2>Find Catalogue Numbers</h2>
       <p class="muted">Use when you only have product names.</p>
-      <ul class="feature-list" style="display:grid; gap:10px; margin:16px 0 18px;">
+      <ul class="feature-list">
         <li>Cross-search EDQM, USP, or both.</li>
         <li>Input cleanup for mixed/noisy strings.</li>
         <li>Copy catalogue column in one click.</li>
@@ -2034,7 +2014,7 @@ def landing_page() -> HTMLResponse:
     <section class="card">
       <h2>Current Batch Numbers</h2>
       <p class="muted">Use when you already have catalogue numbers and need the current batch.</p>
-      <ul class="feature-list" style="display:grid; gap:10px; margin:16px 0 18px;">
+      <ul class="feature-list">
         <li>One line per code.</li>
         <li>EDQM and USP supported.</li>
         <li>Copy-ready batch number column.</li>
