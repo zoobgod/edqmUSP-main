@@ -292,6 +292,30 @@ class USPDownloader:
 
         return ""
 
+    def get_cas_number(self, product_code: str) -> str:
+        if not self._ensure_current_product(product_code):
+            return ""
+
+        target_code = self._current_product.repository_id if self._current_product else product_code
+        requested = self._compact(target_code)
+        matches = self.search_products_by_name(target_code, limit=8)
+
+        for match in matches:
+            if self._compact(match.product_code) != requested:
+                continue
+            cas = (getattr(match, "metadata", {}) or {}).get("cas", "")
+            cas_match = re.search(r"\b\d{2,7}-\d{2}-\d\b", cas or "")
+            if cas_match:
+                return cas_match.group(0)
+
+        for match in matches:
+            cas = (getattr(match, "metadata", {}) or {}).get("cas", "")
+            cas_match = re.search(r"\b\d{2,7}-\d{2}-\d\b", cas or "")
+            if cas_match:
+                return cas_match.group(0)
+
+        return ""
+
     def get_detail_url(self, product_code: str) -> str:
         if self._ensure_current_product(product_code) and self._current_product:
             return urljoin(USP_BASE_URL, self._current_product.route or "")

@@ -19,6 +19,10 @@ from src.services.bundles import (
     resolve_position_name as svc_resolve_position_name,
     safe_file_part as svc_safe_file_part,
 )
+from src.services.cas import (
+    append_cas_to_position_name as svc_append_cas_to_position_name,
+    resolve_cas_number as svc_resolve_cas_number,
+)
 from src.uploaders.ydisk import YDiskUploader
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -77,7 +81,9 @@ def _download_documents(source: str, codes: list[str], doc_types: list[str], bas
         for code in codes:
             status.info(f"Searching for {code}...")
             if downloader.search_product(code):
-                position_names[code] = _resolve_position_name(downloader, code)
+                position_name = _resolve_position_name(downloader, code)
+                cas_number = svc_resolve_cas_number(source, downloader, code, position_name)
+                position_names[code] = svc_append_cas_to_position_name(position_name, cas_number)
                 for doc in doc_types:
                     status.info(f"Downloading {doc} for {code}...")
                     result = downloader.download_document(code, doc)

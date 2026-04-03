@@ -32,6 +32,10 @@ from src.services.bundles import (
     safe_file_part as _svc_safe_file_part,
     zip_member_name as _svc_zip_member_name,
 )
+from src.services.cas import (
+    append_cas_to_position_name as _svc_append_cas_to_position_name,
+    resolve_cas_number as _svc_resolve_cas_number,
+)
 from src.services.lookup import (
     lookup_query_candidates as _svc_lookup_query_candidates,
     search_lookup_candidates as _svc_search_lookup_candidates,
@@ -993,6 +997,7 @@ def _edqm_lookup_enrichment(downloader, product_code: str) -> dict[str, str]:
         "price": summary.get("price", ""),
         "current_batch": summary.get("current_batch", ""),
         "unit_quantity": summary.get("unit_quantity", ""),
+        "cas": summary.get("cas", ""),
     }
 
 
@@ -1019,6 +1024,7 @@ def _edqm_batch_summary(downloader, product_code: str) -> dict[str, str]:
         "dispatching": fields.get("Dispatching conditions", ""),
         "unit_quantity": fields.get("Unit quantity per vial", ""),
         "sales_restriction": fields.get("Sales restriction", ""),
+        "cas": _resolve_cas_number("edqm", downloader, product_code, fields.get("Name") or current.name or product_code),
         "detail_url": getattr(downloader, "get_detail_url", lambda _code: "")(product_code),
     }
 
@@ -1044,6 +1050,7 @@ def _usp_batch_summary(downloader, product_code: str) -> dict[str, str]:
             break
 
     lot_for_display = current_lot or dated_lot or (product.lots[0] if product.lots else None)
+    cas_number = _resolve_cas_number("usp", downloader, product_code, product.display_name or product.repository_id)
     return {
         "name": product.display_name or product.repository_id,
         "current_lot": getattr(lot_for_display, "lot_number", "") if lot_for_display else "",
@@ -1052,6 +1059,7 @@ def _usp_batch_summary(downloader, product_code: str) -> dict[str, str]:
         "material_origin": getattr(lot_for_display, "material_origin", "") if lot_for_display else "",
         "certificate_valid": "Yes" if getattr(lot_for_display, "certificate_valid", False) else "No" if lot_for_display else "",
         "current_flag": "Yes" if getattr(lot_for_display, "current", False) else "No" if lot_for_display else "",
+        "cas": cas_number,
         "detail_url": getattr(downloader, "get_detail_url", lambda _code: "")(product_code),
     }
 
@@ -1103,6 +1111,14 @@ def _resolve_position_name(downloader, code: str) -> str:
     return _svc_resolve_position_name(downloader, code)
 
 
+def _resolve_cas_number(source: str, downloader, code: str, position_name: str = "") -> str:
+    return _svc_resolve_cas_number(source, downloader, code, position_name)
+
+
+def _position_name_with_cas(position_name: str, cas_number: str) -> str:
+    return _svc_append_cas_to_position_name(position_name, cas_number)
+
+
 def _doc_status(result) -> str:
     return "OK" if getattr(result, "success", False) else "Fail"
 
@@ -1123,6 +1139,7 @@ def _edqm_detail_summary(downloader) -> dict[str, str]:
         "availability": fields.get("Availability", ""),
         "storage": fields.get("EDQM long term storage conditions", ""),
         "unit_quantity": fields.get("Unit quantity per vial", ""),
+        "cas": _resolve_cas_number("edqm", downloader, current.code, fields.get("Name") or current.name or current.code),
     }
 
 
@@ -1219,7 +1236,7 @@ def _usp_product_summary(downloader) -> dict[str, str]:
         "orderable": search_summary.get("orderable", ""),
         "packing_size": search_summary.get("packing_size", ""),
         "uom": search_summary.get("uom", ""),
-        "cas": search_summary.get("cas", ""),
+        "cas": search_summary.get("cas", "") or _resolve_cas_number("usp", downloader, product.repository_id, product.display_name or product.repository_id),
         "molecular_formula": search_summary.get("molecular_formula", ""),
     }
 
@@ -1261,9 +1278,13 @@ def _download_batch(source: str, codes: list[str], doc_types: list[str]) -> dict
                     position_name = _resolve_position_name(downloader, code)
                     if summary.get("name"):
                         position_name = str(summary["name"])
+                    cas_number = _resolve_cas_number(source, downloader, code, position_name)
+                    if cas_number and not summary.get("cas"):
+                        summary = dict(summary)
+                        summary["cas"] = cas_number
                     row["name"] = position_name
                     row["summary"] = summary
-                    position_names[code] = position_name
+                    position_names[code] = _position_name_with_cas(position_name, cas_number)
                     timeline = [
                         {"label": "Search", "status": "ok"},
                         {"label": "Metadata", "status": "ok"},
@@ -1347,6 +1368,7 @@ def _lookup_catalogue_numbers(source: str, names: list[str], limit: int = 8) -> 
                                     "source": "EDQM",
                                     "code": match.product_code,
                                     "name": match.name,
+                                    "cas": enrichment.get("cas", ""),
                                     "enrichment": enrichment,
                                 }
                             )
@@ -1360,6 +1382,7 @@ def _lookup_catalogue_numbers(source: str, names: list[str], limit: int = 8) -> 
                                 "source": "EDQM",
                                 "code": "",
                                 "name": "No match found",
+                                "cas": "",
                                 "enrichment": {},
                             }
                         )
@@ -1381,6 +1404,7 @@ def _lookup_catalogue_numbers(source: str, names: list[str], limit: int = 8) -> 
                                     "source": "USP",
                                     "code": match.product_code,
                                     "name": match.name,
+                                    "cas": str((getattr(match, "metadata", {}) or {}).get("cas", "")),
                                     "enrichment": dict(getattr(match, "metadata", {}) or {}),
                                 }
                             )
@@ -1394,6 +1418,7 @@ def _lookup_catalogue_numbers(source: str, names: list[str], limit: int = 8) -> 
                                 "source": "USP",
                                 "code": "",
                                 "name": "No match found",
+                                "cas": "",
                                 "enrichment": {},
                             }
                         )
@@ -1507,7 +1532,7 @@ def _download_form(
       </div>
 
       <button type="submit">Generate ZIP</button>
-      <div class="microcopy">One batch ZIP, folders by position, summary table below, manifest kept as-is.</div>
+      <div class="microcopy">One batch ZIP, folders by position plus CAS when available, summary table below, manifest kept as-is.</div>
   </form>
   {results_html}
 </section>
@@ -1539,10 +1564,11 @@ def _render_download_summary_table(source: str, rows: list[dict[str, object]], d
             ("molecular_formula", False),
         ]
     else:
-        headers = ["Code", "Product Name", "Current Batch", "Price", "Availability", "Storage"]
+        headers = ["Code", "Product Name", "CAS", "Current Batch", "Price", "Availability", "Storage"]
         accessors = [
             ("code", False),
             ("name", False),
+            ("cas", False),
             ("current_batch", False),
             ("price", False),
             ("availability", False),
@@ -1686,7 +1712,7 @@ def _lookup_results_table(rows: list[dict[str, str]]) -> str:
     unique_codes = list(dict.fromkeys(catalogue_numbers))
     code_column = "\n".join(catalogue_numbers)
     unique_code_column = "\n".join(unique_codes)
-    tsv_rows = ["Query\tMatched On\tMatch Type\tSource\tCatalogue Number\tProduct Name"]
+    tsv_rows = ["Query\tMatched On\tMatch Type\tSource\tCatalogue Number\tProduct Name\tCAS"]
 
     def render_lookup_details(row: dict[str, str]) -> str:
         enrichment = row.get("enrichment", {})
@@ -1711,6 +1737,7 @@ def _lookup_results_table(rows: list[dict[str, str]]) -> str:
                 ("Price", enrichment.get("price", "")),
                 ("Current Batch", enrichment.get("current_batch", "")),
                 ("Unit Quantity", enrichment.get("unit_quantity", "")),
+                ("CAS", enrichment.get("cas", "")),
             ]
 
         visible = [(label, value) for label, value in fields if value]
@@ -1738,6 +1765,7 @@ def _lookup_results_table(rows: list[dict[str, str]]) -> str:
                     row["source"],
                     row["code"],
                     row["name"],
+                    row.get("cas", "") or ((row.get("enrichment", {}) or {}).get("cas", "") if isinstance(row.get("enrichment", {}), dict) else ""),
                 ]
             )
         )
@@ -1746,6 +1774,7 @@ def _lookup_results_table(rows: list[dict[str, str]]) -> str:
     for row in rows:
         status = row["code"] if row["code"] else "No match"
         klass = "status-ok" if row["code"] else "status-fail"
+        cas_value = row.get("cas", "") or ((row.get("enrichment", {}) or {}).get("cas", "") if isinstance(row.get("enrichment", {}), dict) else "")
         body.append(
             "<tr>"
             f"<td>{_safe_text(row['query'])}</td>"
@@ -1754,6 +1783,7 @@ def _lookup_results_table(rows: list[dict[str, str]]) -> str:
             f"<td>{_safe_text(row['source'])}</td>"
             f'<td class="{klass} table-code">{_safe_text(status)}</td>'
             f"<td>{_safe_text(row['name'])}</td>"
+            f'<td class="table-code">{_safe_text(cas_value or "—")}</td>'
             f"<td>{render_lookup_details(row)}</td>"
             "</tr>"
         )
@@ -1778,7 +1808,7 @@ def _lookup_results_table(rows: list[dict[str, str]]) -> str:
         f'<textarea id="catalogue-copy-tsv" class="copy-box" readonly style="min-height: 180px;">{_safe_text(tsv_text)}</textarea>'
         '</div>'
         '<div class="table-wrap"><table><thead><tr>'
-        "<th>Original Input</th><th>Matched On</th><th>Match Type</th><th>Source</th><th>Catalogue Number</th><th>Product Name</th><th>Details</th>"
+        "<th>Original Input</th><th>Matched On</th><th>Match Type</th><th>Source</th><th>Catalogue Number</th><th>Product Name</th><th>CAS</th><th>Details</th>"
         "</tr></thead><tbody>"
         + "".join(body)
         + "</tbody></table></div></section>"
@@ -1794,15 +1824,15 @@ def _batch_results_table(rows: list[dict[str, str]]) -> str:
     unique_batch_column = "\n".join(unique_batches)
     source_key = (rows[0]["source"].lower() if rows else "edqm")
     if source_key == "usp":
-        tsv_rows = ["Input\tSource\tCode\tName\tCurrent Lot\tValid Use Date\tCOO\tMaterial Origin\tCertificate Valid\tActionability\tDetail URL"]
+        tsv_rows = ["Input\tSource\tCode\tName\tCAS\tCurrent Lot\tValid Use Date\tCOO\tMaterial Origin\tCertificate Valid\tActionability\tDetail URL"]
         header_html = (
-            "<th>Input</th><th>Source</th><th>Code</th><th>Name</th><th>Current Lot</th><th>Valid Use Date</th>"
+            "<th>Input</th><th>Source</th><th>Code</th><th>Name</th><th>CAS</th><th>Current Lot</th><th>Valid Use Date</th>"
             "<th>COO</th><th>Material Origin</th><th>Certificate Valid</th><th>Actionability</th><th>Detail</th>"
         )
     else:
-        tsv_rows = ["Input\tSource\tCode\tName\tCurrent Batch\tAvailability\tPrice\tStorage\tDispatching\tActionability\tDetail URL"]
+        tsv_rows = ["Input\tSource\tCode\tName\tCAS\tCurrent Batch\tAvailability\tPrice\tStorage\tDispatching\tActionability\tDetail URL"]
         header_html = (
-            "<th>Input</th><th>Source</th><th>Code</th><th>Name</th><th>Current Batch</th><th>Availability</th>"
+            "<th>Input</th><th>Source</th><th>Code</th><th>Name</th><th>CAS</th><th>Current Batch</th><th>Availability</th>"
             "<th>Price</th><th>Storage</th><th>Dispatching</th><th>Actionability</th><th>Detail</th>"
         )
     body = []
@@ -1821,6 +1851,7 @@ def _batch_results_table(rows: list[dict[str, str]]) -> str:
             coo = summary.get("country_of_origin", "")
             material_origin = summary.get("material_origin", "")
             certificate_valid = summary.get("certificate_valid", "")
+            cas_number = summary.get("cas", "")
             tsv_rows.append(
                 "\t".join(
                     [
@@ -1828,6 +1859,7 @@ def _batch_results_table(rows: list[dict[str, str]]) -> str:
                         row["source"],
                         row["code"],
                         row["name"],
+                        cas_number,
                         current_lot,
                         valid_use_date,
                         coo,
@@ -1844,6 +1876,7 @@ def _batch_results_table(rows: list[dict[str, str]]) -> str:
                 f"<td>{_safe_text(row['source'])}</td>"
                 f'<td class="table-code">{_safe_text(row["code"])}</td>'
                 f"<td>{_safe_text(row['name'])}</td>"
+                f'<td class="table-code">{_safe_text(cas_number or "—")}</td>'
                 f'<td class="table-code">{_safe_text(current_lot)}</td>'
                 f"<td>{_safe_text(valid_use_date or '—')}</td>"
                 f"<td>{_safe_text(coo or '—')}</td>"
@@ -1859,6 +1892,7 @@ def _batch_results_table(rows: list[dict[str, str]]) -> str:
             price = summary.get("price", "")
             storage = summary.get("storage", "")
             dispatching = summary.get("dispatching", "")
+            cas_number = summary.get("cas", "")
             tsv_rows.append(
                 "\t".join(
                     [
@@ -1866,6 +1900,7 @@ def _batch_results_table(rows: list[dict[str, str]]) -> str:
                         row["source"],
                         row["code"],
                         row["name"],
+                        cas_number,
                         current_batch,
                         availability,
                         price,
@@ -1882,6 +1917,7 @@ def _batch_results_table(rows: list[dict[str, str]]) -> str:
                 f"<td>{_safe_text(row['source'])}</td>"
                 f'<td class="table-code">{_safe_text(row["code"])}</td>'
                 f"<td>{_safe_text(row['name'])}</td>"
+                f'<td class="table-code">{_safe_text(cas_number or "—")}</td>'
                 f'<td class="table-code">{_safe_text(current_batch)}</td>'
                 f"<td>{_safe_text(availability or '—')}</td>"
                 f"<td>{_safe_text(price or '—')}</td>"

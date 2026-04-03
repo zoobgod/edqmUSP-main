@@ -507,6 +507,19 @@ class EDQMDownloader:
 
         return ""
 
+    def get_cas_number(self, product_code: str) -> str:
+        if not (self._ensure_current_product(product_code) and self._current):
+            return ""
+
+        fields = self._extract_detail_fields(self._current.detail_html)
+        for key, value in fields.items():
+            if self._compact(key) in {"casregistrynumber", "casnumber"} and value:
+                match = re.search(r"\b\d{2,7}-\d{2}-\d\b", value)
+                if match:
+                    return match.group(0)
+
+        return ""
+
     def get_detail_url(self, product_code: str) -> str:
         if self._ensure_current_product(product_code) and self._current:
             return self._current.detail_url or ""

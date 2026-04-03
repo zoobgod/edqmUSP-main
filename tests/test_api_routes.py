@@ -21,11 +21,13 @@ class ApiRouteTests(unittest.TestCase):
                 "source": "EDQM",
                 "code": "Y0001949",
                 "name": "RALTEGRAVIR IMPURITY E CRS",
+                "cas": "871037-78-0",
                 "enrichment": {
                     "availability": "Available",
                     "price": "90 EUR",
                     "current_batch": "2",
                     "unit_quantity": "10 MG",
+                    "cas": "871037-78-0",
                 },
             }
         ]
@@ -41,6 +43,8 @@ class ApiRouteTests(unittest.TestCase):
         self.assertIn("Copy Catalogue Numbers", resp.text)
         self.assertIn("Matched On", resp.text)
         self.assertIn("Normalized", resp.text)
+        self.assertIn("CAS", resp.text)
+        self.assertIn("871037-78-0", resp.text)
         self.assertIn("View details", resp.text)
 
     def test_download_post_renders_summary_page(self):
@@ -55,6 +59,7 @@ class ApiRouteTests(unittest.TestCase):
                     "name": "GLYCEROL MONOSTEARATE 40-55 CRS",
                     "summary": {
                         "name": "GLYCEROL MONOSTEARATE 40-55 CRS",
+                        "cas": "31566-31-1",
                         "current_batch": "4",
                         "price": "90 EUR",
                         "availability": "Available",
@@ -80,6 +85,7 @@ class ApiRouteTests(unittest.TestCase):
         self.assertIn("Download Batch ZIP", resp.text)
         self.assertIn("Download Summary", resp.text)
         self.assertIn("G0400006", resp.text)
+        self.assertIn("31566-31-1", resp.text)
         self.assertIn("download-file?token=", resp.text)
 
     def test_download_file_route_returns_zip(self):
@@ -108,6 +114,7 @@ class ApiRouteTests(unittest.TestCase):
                 "batch_number": "6",
                 "status": "OK",
                 "summary": {
+                    "cas": "15687-27-1",
                     "current_batch": "6",
                     "availability": "Available",
                     "price": "90 EUR",
@@ -132,6 +139,7 @@ class ApiRouteTests(unittest.TestCase):
         self.assertIn("IBUPROFEN CRS", resp.text)
         self.assertIn("6", resp.text)
         self.assertIn("Availability", resp.text)
+        self.assertIn("15687-27-1", resp.text)
         self.assertIn("Open", resp.text)
 
 
