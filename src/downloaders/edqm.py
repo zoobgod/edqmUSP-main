@@ -11,6 +11,7 @@ import logging
 import re
 import socket
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import parse_qs, urljoin, urlparse
@@ -189,7 +190,10 @@ class EDQMDownloader:
 
         doc_url = self._current.links.get(doc_type, "")
         if doc_type != "MSDS" and not doc_url:
-            result.error = f"{doc_type} link not found"
+            if doc_type == "COA":
+                result.error = "COA not publicly available online"
+            else:
+                result.error = f"{doc_type} link not found"
             return result
 
         try:
@@ -273,17 +277,18 @@ class EDQMDownloader:
 
         if not errors:
             return None, "Sigma SDS fallback failed"
-        return None, "Sigma SDS fallback failed: " + " | ".join(errors)
+        return None, self._summarize_sigma_errors(errors)
 
     def _is_sigma_host_reachable(self) -> bool:
         if self._sigma_reachable is not None:
             return self._sigma_reachable
 
         try:
-            conn = socket.create_connection(("www.sigmaaldrich.com", 443), timeout=3)
-            conn.close()
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(socket.getaddrinfo, "www.sigmaaldrich.com", 443, 0, socket.SOCK_STREAM)
+                future.result(timeout=3)
             self._sigma_reachable = True
-        except OSError:
+        except (OSError, FuturesTimeoutError):
             self._sigma_reachable = False
 
         return self._sigma_reachable
@@ -431,6 +436,18 @@ class EDQMDownloader:
         except Exception:  # pragma: no cover
             return None
         return curl_requests
+
+    @staticmethod
+    def _summarize_sigma_errors(errors: list[str]) -> str:
+        lowered = " | ".join(errors).lower()
+        if "could not resolve host" in lowered or "name or service not known" in lowered:
+            return "Sigma SDS fallback failed: Sigma host could not be resolved from the runtime"
+        if "timed out" in lowered or "timeout" in lowered:
+            return "Sigma SDS fallback failed: Sigma did not respond before timeout"
+
+        trimmed = errors[:3]
+        suffix = " | ...more attempts omitted" if len(errors) > 3 else ""
+        return "Sigma SDS fallback failed: " + " | ".join(trimmed) + suffix
 
     def download_all(self, product_code: str) -> list[DownloadResult]:
         """Download COA, MSDS and COO for an EDQM code."""

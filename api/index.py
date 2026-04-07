@@ -1148,6 +1148,17 @@ def _doc_status(result) -> str:
     return "OK" if getattr(result, "success", False) else "Fail"
 
 
+def _is_coa_unavailable_online(doc_type: str, error: str) -> bool:
+    if doc_type.upper() != "COA":
+        return False
+    lowered = (error or "").lower()
+    return (
+        "coa not publicly available online" in lowered
+        or "coa link not found" in lowered
+        or "no valid coa document url found" in lowered
+    )
+
+
 def _edqm_detail_summary(downloader) -> dict[str, str]:
     current = getattr(downloader, "_current", None)
     extractor = getattr(downloader, "_extract_detail_fields", None)
@@ -1336,11 +1347,19 @@ def _download_batch(source: str, codes: list[str], doc_types: list[str]) -> dict
                                 notes.append("Sigma fallback used for MSDS.")
                         else:
                             manifest_lines.append(f"  {doc}: FAIL -> {result.error}")
-                            notes.append(f"{doc}: {result.error or 'Download failed'}")
+                            if _is_coa_unavailable_online(doc, result.error):
+                                notes.append("COA is not publicly available online for this position.")
+                            else:
+                                notes.append(f"{doc}: {result.error or 'Download failed'}")
                     timeline.append({"label": "Package", "status": "ok" if files_downloaded else "fail"})
                     row["doc_results"] = doc_results
                     row["timeline"] = timeline
-                    row["notes"] = notes or (["All requested documents downloaded."] if files_downloaded == len(doc_types) else [])
+                    if files_downloaded == len(doc_types):
+                        row["notes"] = notes or ["All requested documents downloaded."]
+                    elif files_downloaded > 0:
+                        row["notes"] = [f"Partial package: {files_downloaded} of {len(doc_types)} requested documents downloaded."] + notes
+                    else:
+                        row["notes"] = notes or ["No requested documents could be downloaded."]
                 else:
                     row["notes"] = ["Product not found. Manual check required."]
                     row["doc_results"] = {

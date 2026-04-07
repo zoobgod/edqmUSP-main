@@ -33,6 +33,17 @@ class EDQMDownloaderTests(unittest.TestCase):
         self.assertEqual(downloader._country_from_line_tail("immunoglobulins"), "")
         self.assertEqual(downloader._country_from_line_tail("Great Britain"), "Great Britain")
 
+    def test_sigma_error_summary_collapses_dns_failures(self):
+        downloader = EDQMDownloader()
+        message = downloader._summarize_sigma_errors(
+            [
+                "https://www.sigmaaldrich.com/SE/en/sds/sial/g0400006: Failed to perform, curl: (6) Could not resolve host: www.sigmaaldrich.com",
+                "https://www.sigmaaldrich.com/US/en/sds/sial/g0400006: Failed to perform, curl: (6) Could not resolve host: www.sigmaaldrich.com",
+            ]
+        )
+
+        self.assertEqual(message, "Sigma SDS fallback failed: Sigma host could not be resolved from the runtime")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -174,7 +174,10 @@ class USPDownloader:
                 result.file_path = str(downloaded)
                 logger.info("Downloaded USP %s for %s: %s", doc_type, product.repository_id, downloaded)
             else:
-                result.error = last_error or f"No valid {doc_type} document URL found"
+                if doc_type == "COA":
+                    result.error = "COA not publicly available online"
+                else:
+                    result.error = last_error or f"No valid {doc_type} document URL found"
 
         except Exception as exc:  # pragma: no cover - safety net
             result.error = str(exc)
@@ -218,8 +221,9 @@ class USPDownloader:
             return []
 
         records = payload.get("resultsList", {}).get("records", [])
-        matches: list[ProductMatch] = []
+        matches: list[tuple[int, ProductMatch]] = []
         seen: set[str] = set()
+        compact_term = self._compact(term)
 
         for group in records:
             nested = group.get("records") or []
@@ -239,8 +243,7 @@ class USPDownloader:
                 if not code or code in seen:
                     continue
                 seen.add(code)
-                matches.append(
-                    ProductMatch(
+                product_match = ProductMatch(
                         query=term,
                         product_code=code,
                         name=name or code,
@@ -255,12 +258,36 @@ class USPDownloader:
                             "molecular_formula": self._first_attr_value(attrs, "USPProductType.usp_molecular_formula"),
                             "category_type": self._first_attr_value(attrs, "USPProductType.usp_product_category_type"),
                         },
-                    )
                 )
-                if len(matches) >= limit:
-                    return matches
+                matches.append((self._match_rank(term, compact_term, product_match), product_match))
 
-        return matches
+        matches.sort(key=lambda item: (item[0], item[1].name.lower(), item[1].product_code.lower()))
+        return [match for _rank, match in matches[:limit]]
+
+    def _match_rank(self, raw_term: str, compact_term: str, match: ProductMatch) -> int:
+        name = (match.name or "").strip()
+        code = (match.product_code or "").strip()
+        compact_name = self._compact(name)
+        compact_code = self._compact(code)
+        category_type = str((match.metadata or {}).get("category_type", "")).strip().upper()
+
+        if compact_term and compact_code == compact_term:
+            return 0
+        if compact_term and compact_name == compact_term:
+            return 1 if category_type == "RS" else 2
+        if compact_term and compact_name.startswith(compact_term):
+            return 3 if category_type == "RS" else 4
+        if compact_term and compact_term in compact_name:
+            return 5 if category_type == "RS" else 6
+
+        raw_lower = raw_term.lower().strip()
+        lowered = name.lower()
+        if raw_lower and lowered.startswith(raw_lower):
+            return 7 if category_type == "RS" else 8
+        if raw_lower and raw_lower in lowered:
+            return 9 if category_type == "RS" else 10
+
+        return 20 if category_type == "RS" else 30
 
     def _ensure_current_product(self, product_code: str) -> bool:
         if not self._current_product:
