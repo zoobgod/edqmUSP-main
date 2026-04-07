@@ -24,7 +24,8 @@ USP_PRODUCT_API = f"{USP_BASE_URL}/ccstore/v1/products"
 USP_SEARCH_API = f"{USP_BASE_URL}/ccstore/v1/search"
 USP_STATIC_BASE = "https://static.usp.org"
 
-REQUEST_TIMEOUT = 30
+REQUEST_TIMEOUT = (8, 12)
+DOWNLOAD_REQUEST_TIMEOUT = (10, 25)
 
 
 @dataclass
@@ -488,7 +489,7 @@ class USPDownloader:
     def _download_url(self, url: str, base_name: str) -> tuple[Path | None, str]:
         session = self._require_session()
         try:
-            resp = session.get(url, timeout=REQUEST_TIMEOUT)
+            resp = session.get(url, timeout=DOWNLOAD_REQUEST_TIMEOUT)
         except requests.RequestException as exc:
             return None, f"Request failed for {url}: {exc}"
 

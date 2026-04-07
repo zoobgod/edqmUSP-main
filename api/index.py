@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import html
 import re
 import sys
@@ -45,6 +46,8 @@ app = FastAPI(title="edqmUSP")
 DOWNLOAD_CACHE_TTL_SECONDS = 900
 DOWNLOAD_CACHE_MAX_ENTRIES = 20
 _DOWNLOAD_CACHE: dict[str, dict[str, object]] = {}
+LOOKUP_MAX_WORKERS = 4
+DOWNLOAD_MAX_WORKERS = 3
 
 APP_CSS = """
 <style>
@@ -1026,6 +1029,96 @@ def _edqm_lookup_enrichment(downloader, product_code: str) -> dict[str, str]:
     }
 
 
+def _lookup_rows_for_source(
+    source: str,
+    query: str,
+    limit: int = 8,
+    include_edqm_enrichment: bool = True,
+) -> list[dict[str, str]]:
+    source = source.lower()
+
+    with TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+
+        if source == "edqm":
+            from src.downloaders.edqm import EDQMDownloader
+
+            with EDQMDownloader(download_dir=tmp_path) as downloader:
+                matches, used_candidate = _search_lookup_candidates(downloader, query, limit=limit)
+                if not matches:
+                    return [
+                        {
+                            "query": query,
+                            "matched_on": used_candidate,
+                            "match_type": "No match",
+                            "rank": "",
+                            "source": "EDQM",
+                            "code": "",
+                            "name": "No match found",
+                            "cas": "",
+                            "enrichment": {},
+                        }
+                    ]
+
+                rows: list[dict[str, str]] = []
+                for idx, match in enumerate(matches, start=1):
+                    enrichment = (
+                        _edqm_lookup_enrichment(downloader, match.product_code)
+                        if include_edqm_enrichment and idx == 1
+                        else {}
+                    )
+                    rows.append(
+                        {
+                            "query": query,
+                            "matched_on": used_candidate,
+                            "match_type": _lookup_match_type(query, used_candidate),
+                            "rank": str(idx),
+                            "source": "EDQM",
+                            "code": match.product_code,
+                            "name": match.name,
+                            "cas": enrichment.get("cas", ""),
+                            "enrichment": enrichment,
+                        }
+                    )
+                return rows
+
+        from src.downloaders.usp import USPDownloader
+
+        with USPDownloader(download_dir=tmp_path) as downloader:
+            matches, used_candidate = _search_lookup_candidates(downloader, query, limit=limit)
+            if not matches:
+                return [
+                    {
+                        "query": query,
+                        "matched_on": used_candidate,
+                        "match_type": "No match",
+                        "rank": "",
+                        "source": "USP",
+                        "code": "",
+                        "name": "No match found",
+                        "cas": "",
+                        "enrichment": {},
+                    }
+                ]
+
+            rows: list[dict[str, str]] = []
+            for idx, match in enumerate(matches, start=1):
+                rows.append(
+                    {
+                        "query": query,
+                        "matched_on": used_candidate,
+                        "match_type": _lookup_match_type(query, used_candidate),
+                        "rank": str(idx),
+                        "source": "USP",
+                        "code": match.product_code,
+                        "name": match.name,
+                        "cas": str((getattr(match, "metadata", {}) or {}).get("cas", "")),
+                        "enrichment": dict(getattr(match, "metadata", {}) or {}),
+                    }
+                )
+            return rows
+
+
 def _edqm_batch_summary(downloader, product_code: str) -> dict[str, str]:
     if not downloader.search_product(product_code):
         return {}
@@ -1039,6 +1132,7 @@ def _edqm_batch_summary(downloader, product_code: str) -> dict[str, str]:
         fields = extractor(current.detail_html)
     except Exception:
         return {}
+    cas_number = _extract_cas_from_value(fields.get("CAS Registry Number", "") or fields.get("CAS Number", ""))
 
     return {
         "name": fields.get("Name") or current.name or product_code,
@@ -1049,7 +1143,14 @@ def _edqm_batch_summary(downloader, product_code: str) -> dict[str, str]:
         "dispatching": fields.get("Dispatching conditions", ""),
         "unit_quantity": fields.get("Unit quantity per vial", ""),
         "sales_restriction": fields.get("Sales restriction", ""),
-        "cas": _resolve_cas_number("edqm", downloader, product_code, fields.get("Name") or current.name or product_code),
+        "cas": cas_number
+        or _resolve_cas_number(
+            "edqm",
+            downloader,
+            product_code,
+            fields.get("Name") or current.name or product_code,
+            allow_name_fallback=False,
+        ),
         "detail_url": getattr(downloader, "get_detail_url", lambda _code: "")(product_code),
     }
 
@@ -1061,6 +1162,7 @@ def _usp_batch_summary(downloader, product_code: str) -> dict[str, str]:
     product = getattr(downloader, "_current_product", None)
     if not product:
         return {}
+    search_summary = _usp_search_summary(downloader, product.repository_id)
 
     current_lot = None
     for lot in product.lots:
@@ -1075,7 +1177,13 @@ def _usp_batch_summary(downloader, product_code: str) -> dict[str, str]:
             break
 
     lot_for_display = current_lot or dated_lot or (product.lots[0] if product.lots else None)
-    cas_number = _resolve_cas_number("usp", downloader, product_code, product.display_name or product.repository_id)
+    cas_number = search_summary.get("cas", "") or _resolve_cas_number(
+        "usp",
+        downloader,
+        product_code,
+        product.display_name or product.repository_id,
+        allow_name_fallback=False,
+    )
     return {
         "name": product.display_name or product.repository_id,
         "current_lot": getattr(lot_for_display, "lot_number", "") if lot_for_display else "",
@@ -1136,12 +1244,23 @@ def _resolve_position_name(downloader, code: str) -> str:
     return _svc_resolve_position_name(downloader, code)
 
 
-def _resolve_cas_number(source: str, downloader, code: str, position_name: str = "") -> str:
-    return _svc_resolve_cas_number(source, downloader, code, position_name)
+def _resolve_cas_number(
+    source: str,
+    downloader,
+    code: str,
+    position_name: str = "",
+    allow_name_fallback: bool = True,
+) -> str:
+    return _svc_resolve_cas_number(source, downloader, code, position_name, allow_name_fallback)
 
 
 def _position_name_with_cas(position_name: str, cas_number: str) -> str:
     return _svc_append_cas_to_position_name(position_name, cas_number)
+
+
+def _extract_cas_from_value(value: str) -> str:
+    match = re.search(r"\b\d{2,7}-\d{2}-\d\b", value or "")
+    return match.group(0) if match else ""
 
 
 def _doc_status(result) -> str:
@@ -1168,6 +1287,7 @@ def _edqm_detail_summary(downloader) -> dict[str, str]:
         fields = extractor(current.detail_html)
     except Exception:
         return {}
+    cas_number = _extract_cas_from_value(fields.get("CAS Registry Number", "") or fields.get("CAS Number", ""))
     return {
         "name": fields.get("Name") or current.name or current.code,
         "current_batch": fields.get("Current batch number", ""),
@@ -1175,7 +1295,14 @@ def _edqm_detail_summary(downloader) -> dict[str, str]:
         "availability": fields.get("Availability", ""),
         "storage": fields.get("EDQM long term storage conditions", ""),
         "unit_quantity": fields.get("Unit quantity per vial", ""),
-        "cas": _resolve_cas_number("edqm", downloader, current.code, fields.get("Name") or current.name or current.code),
+        "cas": cas_number
+        or _resolve_cas_number(
+            "edqm",
+            downloader,
+            current.code,
+            fields.get("Name") or current.name or current.code,
+            allow_name_fallback=False,
+        ),
     }
 
 
@@ -1272,7 +1399,14 @@ def _usp_product_summary(downloader) -> dict[str, str]:
         "orderable": search_summary.get("orderable", ""),
         "packing_size": search_summary.get("packing_size", ""),
         "uom": search_summary.get("uom", ""),
-        "cas": search_summary.get("cas", "") or _resolve_cas_number("usp", downloader, product.repository_id, product.display_name or product.repository_id),
+        "cas": search_summary.get("cas", "")
+        or _resolve_cas_number(
+            "usp",
+            downloader,
+            product.repository_id,
+            product.display_name or product.repository_id,
+            allow_name_fallback=False,
+        ),
         "molecular_formula": search_summary.get("molecular_formula", ""),
     }
 
@@ -1294,73 +1428,29 @@ def _download_batch(source: str, codes: list[str], doc_types: list[str]) -> dict
     rows: list[dict[str, object]] = []
 
     with TemporaryDirectory() as tmpdir:
-        downloader = DownloaderCls(download_dir=Path(tmpdir))
-        downloader.start()
-        try:
-            for code in codes:
-                manifest_lines.append(f"[{code}]")
-                row: dict[str, object] = {
-                    "code": code,
-                    "source": source.upper(),
-                    "name": "",
-                    "summary": {},
-                    "doc_results": {},
-                    "notes": [],
-                    "timeline": [],
-                }
+        tmp_path = Path(tmpdir)
+
+        def process_code(code: str, index: int) -> dict[str, object]:
+            worker_dir = tmp_path / f"job_{index}_{_safe_filename(code)}"
+            worker_dir.mkdir(parents=True, exist_ok=True)
+            downloader = DownloaderCls(download_dir=worker_dir)
+            manifest_block: list[str] = [f"[{code}]"]
+            row: dict[str, object] = {
+                "code": code,
+                "source": source.upper(),
+                "name": "",
+                "summary": {},
+                "doc_results": {},
+                "notes": [],
+                "timeline": [],
+            }
+            files_for_code: dict[str, Path] = {}
+            position_name = code
+
+            downloader.start()
+            try:
                 row["timeline"] = [{"label": "Search", "status": "fail"}]
-                if downloader.search_product(code):
-                    summary = _edqm_detail_summary(downloader) if source == "edqm" else _usp_product_summary(downloader)
-                    position_name = _resolve_position_name(downloader, code)
-                    if summary.get("name"):
-                        position_name = str(summary["name"])
-                    cas_number = _resolve_cas_number(source, downloader, code, position_name)
-                    if cas_number and not summary.get("cas"):
-                        summary = dict(summary)
-                        summary["cas"] = cas_number
-                    row["name"] = position_name
-                    row["summary"] = summary
-                    position_names[code] = _position_name_with_cas(position_name, cas_number)
-                    timeline = [
-                        {"label": "Search", "status": "ok"},
-                        {"label": "Metadata", "status": "ok"},
-                    ]
-                    doc_results: dict[str, dict[str, str]] = {}
-                    files_downloaded = 0
-                    notes: list[str] = []
-                    for doc in doc_types:
-                        result = downloader.download_document(code, doc)
-                        status = _doc_status(result)
-                        doc_entry = {
-                            "status": status,
-                            "file_name": Path(result.file_path).name if result.success and result.file_path else "",
-                            "error": result.error or "",
-                        }
-                        doc_results[doc] = doc_entry
-                        timeline.append({"label": doc, "status": "ok" if result.success else "fail"})
-                        if result.success:
-                            file_path = Path(result.file_path)
-                            successful_files.setdefault(code, {})[doc] = file_path
-                            manifest_lines.append(f"  {doc}: OK -> {file_path.name}")
-                            files_downloaded += 1
-                            if doc == "MSDS" and "sigma" in file_path.name.lower():
-                                notes.append("Sigma fallback used for MSDS.")
-                        else:
-                            manifest_lines.append(f"  {doc}: FAIL -> {result.error}")
-                            if _is_coa_unavailable_online(doc, result.error):
-                                notes.append("COA is not publicly available online for this position.")
-                            else:
-                                notes.append(f"{doc}: {result.error or 'Download failed'}")
-                    timeline.append({"label": "Package", "status": "ok" if files_downloaded else "fail"})
-                    row["doc_results"] = doc_results
-                    row["timeline"] = timeline
-                    if files_downloaded == len(doc_types):
-                        row["notes"] = notes or ["All requested documents downloaded."]
-                    elif files_downloaded > 0:
-                        row["notes"] = [f"Partial package: {files_downloaded} of {len(doc_types)} requested documents downloaded."] + notes
-                    else:
-                        row["notes"] = notes or ["No requested documents could be downloaded."]
-                else:
+                if not downloader.search_product(code):
                     row["notes"] = ["Product not found. Manual check required."]
                     row["doc_results"] = {
                         doc: {"status": "Fail", "file_name": "", "error": "Product not found"}
@@ -1370,11 +1460,131 @@ def _download_batch(source: str, codes: list[str], doc_types: list[str]) -> dict
                         {"label": doc, "status": "fail"} for doc in doc_types
                     ]
                     for doc in doc_types:
-                        manifest_lines.append(f"  {doc}: FAIL -> Product not found")
-                manifest_lines.append("")
-                rows.append(row)
-        finally:
-            downloader.stop()
+                        manifest_block.append(f"  {doc}: FAIL -> Product not found")
+                    manifest_block.append("")
+                    return {
+                        "code": code,
+                        "row": row,
+                        "manifest_block": manifest_block,
+                        "position_name": "",
+                        "files": files_for_code,
+                    }
+
+                summary = _edqm_detail_summary(downloader) if source == "edqm" else _usp_product_summary(downloader)
+                position_name = _resolve_position_name(downloader, code)
+                if summary.get("name"):
+                    position_name = str(summary["name"])
+                cas_number = str(summary.get("cas", "") or "")
+                if not cas_number:
+                    cas_number = _resolve_cas_number(
+                        source,
+                        downloader,
+                        code,
+                        position_name,
+                        allow_name_fallback=False,
+                    )
+                if cas_number and not summary.get("cas"):
+                    summary = dict(summary)
+                    summary["cas"] = cas_number
+
+                row["name"] = position_name
+                row["summary"] = summary
+                timeline = [
+                    {"label": "Search", "status": "ok"},
+                    {"label": "Metadata", "status": "ok"},
+                ]
+                doc_results: dict[str, dict[str, str]] = {}
+                files_downloaded = 0
+                notes: list[str] = []
+                for doc in doc_types:
+                    result = downloader.download_document(code, doc)
+                    status = _doc_status(result)
+                    doc_entry = {
+                        "status": status,
+                        "file_name": Path(result.file_path).name if result.success and result.file_path else "",
+                        "error": result.error or "",
+                    }
+                    doc_results[doc] = doc_entry
+                    timeline.append({"label": doc, "status": "ok" if result.success else "fail"})
+                    if result.success:
+                        file_path = Path(result.file_path)
+                        files_for_code[doc] = file_path
+                        manifest_block.append(f"  {doc}: OK -> {file_path.name}")
+                        files_downloaded += 1
+                        if doc == "MSDS" and "sigma" in file_path.name.lower():
+                            notes.append("Sigma fallback used for MSDS.")
+                    else:
+                        manifest_block.append(f"  {doc}: FAIL -> {result.error}")
+                        if _is_coa_unavailable_online(doc, result.error):
+                            notes.append("COA is not publicly available online for this position.")
+                        else:
+                            notes.append(f"{doc}: {result.error or 'Download failed'}")
+
+                timeline.append({"label": "Package", "status": "ok" if files_downloaded else "fail"})
+                row["doc_results"] = doc_results
+                row["timeline"] = timeline
+                if files_downloaded == len(doc_types):
+                    row["notes"] = notes or ["All requested documents downloaded."]
+                elif files_downloaded > 0:
+                    row["notes"] = [f"Partial package: {files_downloaded} of {len(doc_types)} requested documents downloaded."] + notes
+                else:
+                    row["notes"] = notes or ["No requested documents could be downloaded."]
+                manifest_block.append("")
+                return {
+                    "code": code,
+                    "row": row,
+                    "manifest_block": manifest_block,
+                    "position_name": _position_name_with_cas(position_name, cas_number),
+                    "files": files_for_code,
+                }
+            finally:
+                downloader.stop()
+
+        results_by_index: dict[int, dict[str, object]] = {}
+        max_workers = min(DOWNLOAD_MAX_WORKERS, max(1, len(codes)))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_map = {
+                executor.submit(process_code, code, index): index
+                for index, code in enumerate(codes)
+            }
+            for future in as_completed(future_map):
+                index = future_map[future]
+                code = codes[index]
+                try:
+                    results_by_index[index] = future.result()
+                except Exception as exc:
+                    results_by_index[index] = {
+                        "code": code,
+                        "row": {
+                            "code": code,
+                            "source": source.upper(),
+                            "name": "",
+                            "summary": {},
+                            "doc_results": {
+                                doc: {"status": "Fail", "file_name": "", "error": str(exc)}
+                                for doc in doc_types
+                            },
+                            "notes": [f"Internal processing error: {exc}"],
+                            "timeline": [{"label": "Search", "status": "fail"}] + [
+                                {"label": doc, "status": "fail"} for doc in doc_types
+                            ],
+                        },
+                        "manifest_block": [f"[{code}]"] + [f"  {doc}: FAIL -> {exc}" for doc in doc_types] + [""],
+                        "position_name": "",
+                        "files": {},
+                    }
+
+        for index in range(len(codes)):
+            result = results_by_index.get(index)
+            if not result:
+                continue
+            code = str(result["code"])
+            manifest_lines.extend(result["manifest_block"])  # type: ignore[arg-type]
+            if result["position_name"]:
+                position_names[code] = str(result["position_name"])
+            if result["files"]:
+                successful_files[code] = result["files"]  # type: ignore[assignment]
+            rows.append(result["row"])  # type: ignore[arg-type]
 
         manifest_text = "\n".join(manifest_lines)
         batch_zip = _build_batch_zip(source, successful_files, position_names, manifest_text) if successful_files else b""
@@ -1390,82 +1600,57 @@ def _download_batch(source: str, codes: list[str], doc_types: list[str]) -> dict
 def _lookup_catalogue_numbers(source: str, names: list[str], limit: int = 8) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     source = source.lower()
+    requested_sources: list[str] = []
+    if source in {"edqm", "both"}:
+        requested_sources.append("edqm")
+    if source in {"usp", "both"}:
+        requested_sources.append("usp")
 
-    with TemporaryDirectory() as tmpdir:
-        tmp_path = Path(tmpdir)
+    tasks: list[tuple[int, int, str, str]] = []
+    for source_index, source_name in enumerate(requested_sources):
+        for query_index, query in enumerate(names):
+            tasks.append((source_index, query_index, source_name, query))
 
-        if source in {"edqm", "both"}:
-            from src.downloaders.edqm import EDQMDownloader
+    if not tasks:
+        return rows
 
-            with EDQMDownloader(download_dir=tmp_path) as downloader:
-                for query in names:
-                    matches, used_candidate = _search_lookup_candidates(downloader, query, limit=limit)
-                    if matches:
-                        for idx, match in enumerate(matches, start=1):
-                            enrichment = _edqm_lookup_enrichment(downloader, match.product_code) if idx <= 2 else {}
-                            rows.append(
-                                {
-                                    "query": query,
-                                    "matched_on": used_candidate,
-                                    "match_type": _lookup_match_type(query, used_candidate),
-                                    "rank": str(idx),
-                                    "source": "EDQM",
-                                    "code": match.product_code,
-                                    "name": match.name,
-                                    "cas": enrichment.get("cas", ""),
-                                    "enrichment": enrichment,
-                                }
-                            )
-                    else:
-                        rows.append(
-                            {
-                                "query": query,
-                                "matched_on": used_candidate,
-                                "match_type": "No match",
-                                "rank": "",
-                                "source": "EDQM",
-                                "code": "",
-                                "name": "No match found",
-                                "cas": "",
-                                "enrichment": {},
-                            }
-                        )
+    ordered_results: dict[tuple[int, int], list[dict[str, str]]] = {}
+    include_edqm_enrichment = source == "edqm" and len(names) == 1
+    max_workers = min(LOOKUP_MAX_WORKERS, len(tasks))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_map = {
+            executor.submit(
+                _lookup_rows_for_source,
+                source_name,
+                query,
+                limit,
+                include_edqm_enrichment,
+            ): (source_index, query_index)
+            for source_index, query_index, source_name, query in tasks
+        }
+        for future in as_completed(future_map):
+            key = future_map[future]
+            source_name = requested_sources[key[0]].upper()
+            query = names[key[1]]
+            try:
+                ordered_results[key] = future.result()
+            except Exception as exc:
+                ordered_results[key] = [
+                    {
+                        "query": query,
+                        "matched_on": "",
+                        "match_type": "Error",
+                        "rank": "",
+                        "source": source_name,
+                        "code": "",
+                        "name": f"Lookup failed: {exc}",
+                        "cas": "",
+                        "enrichment": {},
+                    }
+                ]
 
-        if source in {"usp", "both"}:
-            from src.downloaders.usp import USPDownloader
-
-            with USPDownloader(download_dir=tmp_path) as downloader:
-                for query in names:
-                    matches, used_candidate = _search_lookup_candidates(downloader, query, limit=limit)
-                    if matches:
-                        for idx, match in enumerate(matches, start=1):
-                            rows.append(
-                                {
-                                    "query": query,
-                                    "matched_on": used_candidate,
-                                    "match_type": _lookup_match_type(query, used_candidate),
-                                    "rank": str(idx),
-                                    "source": "USP",
-                                    "code": match.product_code,
-                                    "name": match.name,
-                                    "cas": str((getattr(match, "metadata", {}) or {}).get("cas", "")),
-                                    "enrichment": dict(getattr(match, "metadata", {}) or {}),
-                                }
-                            )
-                    else:
-                        rows.append(
-                            {
-                                "query": query,
-                                "matched_on": used_candidate,
-                                "match_type": "No match",
-                                "rank": "",
-                                "source": "USP",
-                                "code": "",
-                                "name": "No match found",
-                                "cas": "",
-                                "enrichment": {},
-                            }
-                        )
+    for key in sorted(ordered_results):
+        rows.extend(ordered_results[key])
 
     return rows
 

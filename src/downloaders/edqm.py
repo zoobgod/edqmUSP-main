@@ -38,7 +38,8 @@ SIGMA_SDS_URL_TEMPLATE_US_NO_QUERY = "https://www.sigmaaldrich.com/US/en/sds/sia
 SIGMA_PRODUCT_URL_TEMPLATE = "https://www.sigmaaldrich.com/US/en/product/sial/{code}"
 SIGMA_IMPERSONATE = "chrome124"
 
-REQUEST_TIMEOUT = 30
+REQUEST_TIMEOUT = (8, 12)
+DOWNLOAD_REQUEST_TIMEOUT = (10, 25)
 SIGMA_REQUEST_TIMEOUT = (8, 15)
 SIGMA_CURL_TIMEOUT = 12
 
@@ -709,7 +710,7 @@ class EDQMDownloader:
     def _download_binary(self, url: str) -> Path:
         session = self._require_session()
         try:
-            resp = session.get(url, timeout=REQUEST_TIMEOUT)
+            resp = session.get(url, timeout=DOWNLOAD_REQUEST_TIMEOUT)
             resp.raise_for_status()
         except requests.RequestException as exc:
             raise RuntimeError(f"Request failed for {url}: {exc}") from exc

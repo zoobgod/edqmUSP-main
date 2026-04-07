@@ -10,7 +10,7 @@ from urllib.parse import quote
 import requests
 
 CAS_PATTERN = re.compile(r"\b\d{2,7}-\d{2}-\d\b")
-SIGMA_TIMEOUT = 20
+SIGMA_TIMEOUT = 8
 SIGMA_IMPERSONATE = "chrome124"
 
 
@@ -29,7 +29,13 @@ def append_cas_to_position_name(position_name: str, cas_number: str) -> str:
     return f"{name} ({cas})"
 
 
-def resolve_cas_number(source: str, downloader, product_code: str, product_name: str = "") -> str:
+def resolve_cas_number(
+    source: str,
+    downloader,
+    product_code: str,
+    product_name: str = "",
+    allow_name_fallback: bool = True,
+) -> str:
     getter = getattr(downloader, "get_cas_number", None)
     if callable(getter):
         try:
@@ -39,11 +45,16 @@ def resolve_cas_number(source: str, downloader, product_code: str, product_name:
         except Exception:
             pass
 
-    return sigma_cas_number(source, product_code, product_name)
+    return sigma_cas_number(source, product_code, product_name, allow_name_fallback)
 
 
 @lru_cache(maxsize=512)
-def sigma_cas_number(source: str, product_code: str, product_name: str = "") -> str:
+def sigma_cas_number(
+    source: str,
+    product_code: str,
+    product_name: str = "",
+    allow_name_fallback: bool = True,
+) -> str:
     code = re.sub(r"[^a-z0-9]+", "", (product_code or "").lower())
 
     for url in _sigma_product_urls(source, code):
@@ -55,7 +66,7 @@ def sigma_cas_number(source: str, product_code: str, product_name: str = "") -> 
             return cas
 
     search_term = (product_name or "").strip()
-    if search_term:
+    if allow_name_fallback and search_term:
         for url in _sigma_search_urls(search_term):
             html_text = _fetch_sigma_html(url)
             if not html_text:
