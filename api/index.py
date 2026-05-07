@@ -1071,7 +1071,7 @@ def _lookup_rows_for_source(
                 for idx, match in enumerate(matches, start=1):
                     enrichment = (
                         _edqm_lookup_enrichment(downloader, match.product_code)
-                        if include_lookup_enrichment and idx == 1
+                        if include_lookup_enrichment
                         else {}
                     )
                     rows.append(
@@ -1111,7 +1111,7 @@ def _lookup_rows_for_source(
             rows: list[dict[str, str]] = []
             for idx, match in enumerate(matches, start=1):
                 enrichment = dict(getattr(match, "metadata", {}) or {})
-                if include_lookup_enrichment and idx == 1:
+                if include_lookup_enrichment:
                     enrichment.update(_usp_lookup_enrichment(downloader, match.product_code))
                 rows.append(
                     {
