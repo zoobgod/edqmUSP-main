@@ -1025,15 +1025,22 @@ def _edqm_lookup_enrichment(downloader, product_code: str) -> dict[str, str]:
         "price": summary.get("price", ""),
         "current_batch": summary.get("current_batch", ""),
         "unit_quantity": summary.get("unit_quantity", ""),
+        "storage": summary.get("storage", ""),
         "cas": summary.get("cas", ""),
     }
+
+
+def _usp_lookup_enrichment(downloader, product_code: str) -> dict[str, str]:
+    if not downloader.search_product(product_code):
+        return {}
+    return _usp_product_summary(downloader)
 
 
 def _lookup_rows_for_source(
     source: str,
     query: str,
     limit: int = 8,
-    include_edqm_enrichment: bool = True,
+    include_lookup_enrichment: bool = True,
 ) -> list[dict[str, str]]:
     source = source.lower()
 
@@ -1064,7 +1071,7 @@ def _lookup_rows_for_source(
                 for idx, match in enumerate(matches, start=1):
                     enrichment = (
                         _edqm_lookup_enrichment(downloader, match.product_code)
-                        if include_edqm_enrichment and idx == 1
+                        if include_lookup_enrichment and idx == 1
                         else {}
                     )
                     rows.append(
@@ -1103,6 +1110,9 @@ def _lookup_rows_for_source(
 
             rows: list[dict[str, str]] = []
             for idx, match in enumerate(matches, start=1):
+                enrichment = dict(getattr(match, "metadata", {}) or {})
+                if include_lookup_enrichment and idx == 1:
+                    enrichment.update(_usp_lookup_enrichment(downloader, match.product_code))
                 rows.append(
                     {
                         "query": query,
@@ -1112,8 +1122,8 @@ def _lookup_rows_for_source(
                         "source": "USP",
                         "code": match.product_code,
                         "name": match.name,
-                        "cas": str((getattr(match, "metadata", {}) or {}).get("cas", "")),
-                        "enrichment": dict(getattr(match, "metadata", {}) or {}),
+                        "cas": str(enrichment.get("cas", "")),
+                        "enrichment": enrichment,
                     }
                 )
             return rows
@@ -1615,7 +1625,7 @@ def _lookup_catalogue_numbers(source: str, names: list[str], limit: int = 8) -> 
         return rows
 
     ordered_results: dict[tuple[int, int], list[dict[str, str]]] = {}
-    include_edqm_enrichment = source == "edqm" and len(names) == 1
+    include_lookup_enrichment = len(names) <= 5
     max_workers = min(LOOKUP_MAX_WORKERS, len(tasks))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_map = {
@@ -1624,7 +1634,7 @@ def _lookup_catalogue_numbers(source: str, names: list[str], limit: int = 8) -> 
                 source_name,
                 query,
                 limit,
-                include_edqm_enrichment,
+                include_lookup_enrichment,
             ): (source_index, query_index)
             for source_index, query_index, source_name, query in tasks
         }
@@ -1941,7 +1951,47 @@ def _lookup_results_table(rows: list[dict[str, str]]) -> str:
     unique_codes = list(dict.fromkeys(catalogue_numbers))
     code_column = "\n".join(catalogue_numbers)
     unique_code_column = "\n".join(unique_codes)
-    tsv_rows = ["Query\tMatched On\tMatch Type\tSource\tCatalogue Number\tProduct Name\tCAS"]
+    tsv_rows = [
+        "Query\tMatched On\tMatch Type\tSource\tCatalogue Number\tProduct Name\tCAS\tCurrent Batch/Lot\tPrice\tAvailability/In Stock\tPack/Qty"
+    ]
+
+    def cas_value_for_row(row: dict[str, str]) -> str:
+        enrichment = row.get("enrichment", {})
+        if not isinstance(enrichment, dict):
+            enrichment = {}
+        return str(row.get("cas", "") or enrichment.get("cas", "") or "")
+
+    def current_value_for_row(row: dict[str, str]) -> str:
+        enrichment = row.get("enrichment", {})
+        if not isinstance(enrichment, dict):
+            enrichment = {}
+        if row["source"] == "USP":
+            return str(enrichment.get("current_lot", "") or "")
+        return str(enrichment.get("current_batch", "") or "")
+
+    def price_value_for_row(row: dict[str, str]) -> str:
+        enrichment = row.get("enrichment", {})
+        if not isinstance(enrichment, dict):
+            enrichment = {}
+        return str(enrichment.get("price", "") or "")
+
+    def status_value_for_row(row: dict[str, str]) -> str:
+        enrichment = row.get("enrichment", {})
+        if not isinstance(enrichment, dict):
+            enrichment = {}
+        if row["source"] == "USP":
+            return str(enrichment.get("in_stock", "") or enrichment.get("country_of_origin", "") or "")
+        return str(enrichment.get("availability", "") or "")
+
+    def pack_value_for_row(row: dict[str, str]) -> str:
+        enrichment = row.get("enrichment", {})
+        if not isinstance(enrichment, dict):
+            enrichment = {}
+        if row["source"] == "USP":
+            packing_size = str(enrichment.get("packing_size", "") or "")
+            uom = str(enrichment.get("uom", "") or "")
+            return " ".join(part for part in [packing_size, uom] if part).strip()
+        return str(enrichment.get("unit_quantity", "") or "")
 
     def render_lookup_details(row: dict[str, str]) -> str:
         enrichment = row.get("enrichment", {})
@@ -1952,13 +2002,18 @@ def _lookup_results_table(rows: list[dict[str, str]]) -> str:
             fields = [
                 ("List Price", enrichment.get("price", "")),
                 ("Current Lot", enrichment.get("current_lot", "")),
+                ("Country of Origin", enrichment.get("country_of_origin", "")),
+                ("Lot History", enrichment.get("lot_history", "")),
+                ("Material Origin", enrichment.get("material_origin", "")),
                 ("In Stock", enrichment.get("in_stock", "")),
                 ("Ready to Ship", enrichment.get("ready_to_ship", "")),
+                ("Orderable", enrichment.get("orderable", "")),
                 ("Pack Size", enrichment.get("packing_size", "")),
                 ("UOM", enrichment.get("uom", "")),
                 ("CAS", enrichment.get("cas", "")),
                 ("Molecular Formula", enrichment.get("molecular_formula", "")),
                 ("Category", enrichment.get("category_type", "")),
+                ("SDS Availability", enrichment.get("sds_availability", "")),
             ]
         else:
             fields = [
@@ -1966,6 +2021,7 @@ def _lookup_results_table(rows: list[dict[str, str]]) -> str:
                 ("Price", enrichment.get("price", "")),
                 ("Current Batch", enrichment.get("current_batch", "")),
                 ("Unit Quantity", enrichment.get("unit_quantity", "")),
+                ("Storage", enrichment.get("storage", "")),
                 ("CAS", enrichment.get("cas", "")),
             ]
 
@@ -1994,7 +2050,11 @@ def _lookup_results_table(rows: list[dict[str, str]]) -> str:
                     row["source"],
                     row["code"],
                     row["name"],
-                    row.get("cas", "") or ((row.get("enrichment", {}) or {}).get("cas", "") if isinstance(row.get("enrichment", {}), dict) else ""),
+                    cas_value_for_row(row),
+                    current_value_for_row(row),
+                    price_value_for_row(row),
+                    status_value_for_row(row),
+                    pack_value_for_row(row),
                 ]
             )
         )
@@ -2003,7 +2063,11 @@ def _lookup_results_table(rows: list[dict[str, str]]) -> str:
     for row in rows:
         status = row["code"] if row["code"] else "No match"
         klass = "status-ok" if row["code"] else "status-fail"
-        cas_value = row.get("cas", "") or ((row.get("enrichment", {}) or {}).get("cas", "") if isinstance(row.get("enrichment", {}), dict) else "")
+        cas_value = cas_value_for_row(row)
+        current_value = current_value_for_row(row)
+        price_value = price_value_for_row(row)
+        status_value = status_value_for_row(row)
+        pack_value = pack_value_for_row(row)
         body.append(
             "<tr>"
             f"<td>{_safe_text(row['query'])}</td>"
@@ -2013,6 +2077,10 @@ def _lookup_results_table(rows: list[dict[str, str]]) -> str:
             f'<td class="{klass} table-code">{_safe_text(status)}</td>'
             f"<td>{_safe_text(row['name'])}</td>"
             f'<td class="table-code">{_safe_text(cas_value or "—")}</td>'
+            f"<td>{_safe_text(current_value or '—')}</td>"
+            f"<td>{_safe_text(price_value or '—')}</td>"
+            f"<td>{_safe_text(status_value or '—')}</td>"
+            f"<td>{_safe_text(pack_value or '—')}</td>"
             f"<td>{render_lookup_details(row)}</td>"
             "</tr>"
         )
@@ -2037,7 +2105,7 @@ def _lookup_results_table(rows: list[dict[str, str]]) -> str:
         f'<textarea id="catalogue-copy-tsv" class="copy-box" readonly style="min-height: 180px;">{_safe_text(tsv_text)}</textarea>'
         '</div>'
         '<div class="table-wrap"><table><thead><tr>'
-        "<th>Original Input</th><th>Matched On</th><th>Match Type</th><th>Source</th><th>Catalogue Number</th><th>Product Name</th><th>CAS</th><th>Details</th>"
+        "<th>Original Input</th><th>Matched On</th><th>Match Type</th><th>Source</th><th>Catalogue Number</th><th>Product Name</th><th>CAS</th><th>Current Batch / Lot</th><th>Price</th><th>Availability / In Stock</th><th>Pack / Qty</th><th>Details</th>"
         "</tr></thead><tbody>"
         + "".join(body)
         + "</tbody></table></div></section>"
