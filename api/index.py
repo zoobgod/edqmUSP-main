@@ -74,6 +74,7 @@ APP_CSS = """
 }
 * { box-sizing: border-box; }
 html { scroll-behavior: smooth; }
+button, input, select, textarea { font: inherit; }
 body {
   margin: 0;
   background:
@@ -85,6 +86,31 @@ body {
   font-family: "Manrope", "Segoe UI", sans-serif;
   min-height: 100vh;
   position: relative;
+}
+.skip-link {
+  position: fixed;
+  top: 10px;
+  left: 12px;
+  z-index: 100;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: var(--dark);
+  color: #fff;
+  text-decoration: none;
+  transform: translateY(-160%);
+  transition: transform 140ms ease;
+}
+.skip-link:focus-visible { transform: translateY(0); }
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 body::before {
   content: "";
@@ -123,6 +149,11 @@ body::before {
   display: flex;
   align-items: center;
   gap: 14px;
+}
+.brand-link {
+  color: inherit;
+  text-decoration: none;
+  border-radius: 12px;
 }
 .brand-mark {
   width: 18px;
@@ -173,6 +204,15 @@ body::before {
   background: var(--dark);
   color: #fff;
   border-color: transparent;
+}
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+summary:focus-visible {
+  outline: 3px solid rgba(59, 130, 246, 0.48);
+  outline-offset: 3px;
 }
 h1, h2, h3 {
   font-family: "Fraunces", Georgia, serif;
@@ -263,6 +303,14 @@ a {
   height: 8px;
   border-radius: 50%;
   background: linear-gradient(135deg, var(--primary-light), var(--dark-2));
+}
+.hero-shell .eyebrow {
+  color: #dbeafe;
+  border-color: rgba(147, 197, 253, 0.3);
+  background: rgba(59, 130, 246, 0.16);
+}
+.hero-shell .eyebrow::before {
+  background: #93c5fd;
 }
 .lede {
   max-width: 760px;
@@ -405,6 +453,29 @@ a {
   filter: saturate(1.06);
   box-shadow: 0 14px 28px rgba(13, 92, 99, 0.22);
 }
+button:disabled {
+  cursor: wait;
+  opacity: 0.74;
+  transform: none;
+  filter: none;
+}
+.button[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.7;
+  pointer-events: none;
+}
+.button-spinner {
+  display: inline-block;
+  width: 0.9em;
+  height: 0.9em;
+  margin-right: 8px;
+  border: 2px solid rgba(255,255,255,0.38);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: spin 720ms linear infinite;
+  vertical-align: -0.08em;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
 .button.secondary, button.secondary {
   background: linear-gradient(135deg, var(--dark), var(--dark-2));
   box-shadow: 0 10px 24px rgba(166, 106, 43, 0.18);
@@ -449,6 +520,25 @@ label {
   color: var(--muted-2);
   font-size: 0.92rem;
   margin-bottom: 2px;
+}
+.field-count {
+  color: var(--muted-2);
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-align: right;
+}
+fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+legend {
+  display: block;
+  width: 100%;
+  font-weight: 800;
+  margin: 14px 0 8px;
+  letter-spacing: 0.01em;
 }
 textarea, select, input[type="text"] {
   width: 100%;
@@ -630,6 +720,26 @@ tbody tr:hover td {
   border: 1px solid rgba(166, 106, 43, 0.18);
   background: rgba(201, 139, 60, 0.10);
 }
+.toast {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 50;
+  max-width: min(360px, calc(100vw - 36px));
+  padding: 12px 16px;
+  border-radius: 14px;
+  background: var(--dark);
+  color: #fff;
+  box-shadow: var(--shadow);
+  opacity: 0;
+  transform: translateY(12px);
+  pointer-events: none;
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+.toast.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
 .result-actions {
   display: flex;
   align-items: center;
@@ -801,6 +911,16 @@ pre {
 .task-pill b {
   color: #9ec8ff;
 }
+.site-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 28px;
+  padding: 18px 6px 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+}
 @media (max-width: 700px) {
   .page { padding: 14px 12px 48px; }
   .topbar {
@@ -809,10 +929,30 @@ pre {
     align-items: flex-start;
     flex-direction: column;
   }
-  .nav { justify-content: flex-start; }
+  .nav {
+    width: 100%;
+    justify-content: flex-start;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding: 2px 2px 7px;
+    scrollbar-width: thin;
+  }
+  .nav a { flex: 0 0 auto; padding: 9px 13px; }
+  .table-wrap::before {
+    content: "Swipe horizontally to see all columns →";
+    display: block;
+    position: sticky;
+    left: 0;
+    width: max-content;
+    margin: 0 0 10px;
+    color: var(--muted-2);
+    font-size: 0.78rem;
+    font-weight: 700;
+  }
   .brand-title { font-size: 1.5rem; }
   .hero-shell, .surface, .card, .panel, .hero-aside, .table-panel, .manifest-panel { padding: 18px; }
   h1 { font-size: clamp(2.2rem, 12vw, 3.4rem); }
+  .site-footer { align-items: flex-start; flex-direction: column; }
 }
 @media (max-width: 900px) {
   .hero-grid, .form-grid {
@@ -820,13 +960,32 @@ pre {
   }
   .topbar { flex-wrap: wrap; }
 }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}
 </style>
 """
 
 APP_SCRIPT = """
 <script>
+var announceTimer;
+function announce(message) {
+  var el = document.getElementById('app-toast');
+  if (!el) return;
+  el.textContent = message;
+  el.classList.add('visible');
+  clearTimeout(announceTimer);
+  announceTimer = setTimeout(function() { el.classList.remove('visible'); }, 2200);
+}
 function showCopyFeedback(el, success) {
   el.style.borderColor = success ? '#1f58c3' : '#d1495b';
+  announce(success ? 'Copied to clipboard.' : 'Copy failed. Select the text and copy it manually.');
   setTimeout(function() { el.style.borderColor = ''; }, 600);
 }
 function legacyCopy(el) {
@@ -853,20 +1012,43 @@ function scrollToResult(id) {
   var el = document.getElementById(id);
   if (!el) return;
   window.requestAnimationFrame(function() {
-    el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    el.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' });
   });
 }
+function countListItems(value) {
+  return value.split(/[\\r\\n;]+/).map(function(item) { return item.trim(); }).filter(Boolean).length;
+}
+function resetSubmitButton(btn) {
+  if (!btn || !btn.dataset.originalHtml) return;
+  btn.disabled = false;
+  btn.innerHTML = btn.dataset.originalHtml;
+  btn.removeAttribute('aria-busy');
+}
 document.addEventListener('DOMContentLoaded', function() {
+  document.querySelectorAll('textarea[data-list-input]').forEach(function(input) {
+    var count = document.querySelector('[data-count-for="' + input.id + '"]');
+    var updateCount = function() {
+      var itemCount = countListItems(input.value);
+      if (count) count.textContent = itemCount + (itemCount === 1 ? ' item' : ' items');
+    };
+    input.addEventListener('input', updateCount);
+    updateCount();
+  });
   document.querySelectorAll('form').forEach(function(form) {
     form.addEventListener('submit', function() {
       var btn = form.querySelector('button[type="submit"]');
       if (btn && !btn.disabled) {
         btn.disabled = true;
-        btn.dataset.originalText = btn.textContent;
-        btn.textContent = 'Processing\u2026';
+        btn.dataset.originalHtml = btn.innerHTML;
+        btn.setAttribute('aria-busy', 'true');
+        btn.innerHTML = '<span class="button-spinner" aria-hidden="true"></span>' + (btn.dataset.loadingLabel || 'Processing\u2026');
       }
     });
   });
+});
+window.addEventListener('pageshow', function() {
+  document.querySelectorAll('button[type="submit"]').forEach(resetSubmitButton);
 });
 </script>
 """
@@ -879,10 +1061,13 @@ def _page(title: str, body: str, active: str = "") -> HTMLResponse:
         ("/lookup", "Find Catalogue Numbers", "lookup"),
         ("/batches", "Current Batch Numbers", "batches"),
     ]
-    nav_html = "".join(
-        f'<a href="{href}" class="{"active" if key == active else ""}">{label}</a>'
-        for href, label, key in nav_items
-    )
+    nav_html_parts: list[str] = []
+    for href, label, key in nav_items:
+        current_attr = ' aria-current="page"' if key == active else ""
+        nav_html_parts.append(
+            f'<a href="{href}" class="{"active" if key == active else ""}"{current_attr}>{label}</a>'
+        )
+    nav_html = "".join(nav_html_parts)
     return HTMLResponse(
         f"""<!doctype html>
 <html lang="en">
@@ -890,6 +1075,7 @@ def _page(title: str, body: str, active: str = "") -> HTMLResponse:
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="description" content="Automated EDQM and USP document retrieval — COA, MSDS, COO downloads and catalogue lookup.">
+    <meta name="theme-color" content="#111827">
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='34' fill='%23111827'/></svg>">
     <title>{html.escape(title)}</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -899,19 +1085,27 @@ def _page(title: str, body: str, active: str = "") -> HTMLResponse:
     {APP_SCRIPT}
   </head>
   <body>
-    <main class="page">
+    <a class="skip-link" href="#main-content">Skip to main content</a>
+    <div class="page">
       <header class="topbar">
-        <div class="brand">
-          <div class="brand-mark" aria-hidden="true"></div>
-          <div class="brand-copy">
-            <div class="brand-title">edqmUSP</div>
-            <div class="brand-subtitle">Instant regulatory document access</div>
-          </div>
-        </div>
-        <nav class="nav">{nav_html}</nav>
+        <a class="brand brand-link" href="/" aria-label="edqmUSP home">
+            <div class="brand-mark" aria-hidden="true"></div>
+            <div class="brand-copy">
+              <div class="brand-title">edqmUSP</div>
+              <div class="brand-subtitle">Regulatory document workspace</div>
+            </div>
+        </a>
+        <nav class="nav" aria-label="Primary navigation">{nav_html}</nav>
       </header>
-      {body}
-    </main>
+      <main id="main-content" tabindex="-1">
+        {body}
+      </main>
+      <footer class="site-footer">
+        <span>Public EDQM and USP sources · no catalogue login required</span>
+        <span>COA · MSDS · COO</span>
+      </footer>
+    </div>
+    <div id="app-toast" class="toast" role="status" aria-live="polite" aria-atomic="true"></div>
   </body>
 </html>"""
     )
@@ -974,10 +1168,13 @@ def _parse_vercel_form(raw_body: bytes) -> dict[str, list[str]]:
 
 def _parse_lines(raw: str) -> list[str]:
     values: list[str] = []
+    seen: set[str] = set()
     for piece in re.split(r"[\r\n;]+", raw or ""):
         item = re.sub(r"^\s*(?:[-*]|\d+[.)])\s*", "", piece).strip()
-        if item:
+        key = item.casefold()
+        if item and key not in seen:
             values.append(item)
+            seen.add(key)
     return values
 
 
@@ -1336,6 +1533,8 @@ def _usp_search_summary(downloader, code: str) -> dict[str, str]:
         return {}
 
     requested = compact(code)
+    format_price = getattr(downloader, "_format_price", lambda value: value)
+    format_flag = getattr(downloader, "_format_flag", lambda value: value)
     records = payload.get("resultsList", {}).get("records", [])
     for group in records:
         for rec in group.get("records") or []:
@@ -1344,10 +1543,10 @@ def _usp_search_summary(downloader, code: str) -> dict[str, str]:
             if candidate and compact(candidate) != requested:
                 continue
             return {
-                "price": ((attrs.get("product.listPrice") or [""])[0] or "").strip(),
-                "in_stock": ((attrs.get("USPProductType.usp_in_stock") or [""])[0] or "").strip(),
-                "orderable": ((attrs.get("USPProductType.usp_is_orderable") or [""])[0] or "").strip(),
-                "ready_to_ship": ((attrs.get("USPProductType.usp_ready_to_ship") or [""])[0] or "").strip(),
+                "price": format_price(((attrs.get("product.listPrice") or [""])[0] or "").strip()),
+                "in_stock": format_flag(((attrs.get("USPProductType.usp_in_stock") or [""])[0] or "").strip()),
+                "orderable": format_flag(((attrs.get("USPProductType.usp_is_orderable") or [""])[0] or "").strip()),
+                "ready_to_ship": format_flag(((attrs.get("USPProductType.usp_ready_to_ship") or [""])[0] or "").strip()),
                 "packing_size": ((attrs.get("USPProductType.usp_packing_size") or [""])[0] or "").strip(),
                 "uom": ((attrs.get("USPProductType.usp_uom") or [""])[0] or "").strip(),
                 "cas": ((attrs.get("USPProductType.usp_cas_number") or [""])[0] or "").strip(),
@@ -1461,16 +1660,19 @@ def _download_batch(source: str, codes: list[str], doc_types: list[str]) -> dict
             try:
                 row["timeline"] = [{"label": "Search", "status": "fail"}]
                 if not downloader.search_product(code):
-                    row["notes"] = ["Product not found. Manual check required."]
+                    error_getter = getattr(downloader, "get_last_error", None)
+                    lookup_error = error_getter() if callable(error_getter) else ""
+                    lookup_error = lookup_error or "Product not found"
+                    row["notes"] = [f"{lookup_error}. Manual check may be required."]
                     row["doc_results"] = {
-                        doc: {"status": "Fail", "file_name": "", "error": "Product not found"}
+                        doc: {"status": "Fail", "file_name": "", "error": lookup_error}
                         for doc in doc_types
                     }
                     row["timeline"] = [{"label": "Search", "status": "fail"}] + [
                         {"label": doc, "status": "fail"} for doc in doc_types
                     ]
                     for doc in doc_types:
-                        manifest_block.append(f"  {doc}: FAIL -> Product not found")
+                        manifest_block.append(f"  {doc}: FAIL -> {lookup_error}")
                     manifest_block.append("")
                     return {
                         "code": code,
@@ -1734,9 +1936,10 @@ def _download_form(
     results_html: str = "",
 ) -> str:
     source = source.lower()
-    active_docs = {doc.upper() for doc in (selected_docs or ["COA", "MSDS", "COO"])}
+    doc_selection = selected_docs if selected_docs is not None else ["COA", "MSDS", "COO"]
+    active_docs = {doc.upper() for doc in doc_selection}
     checked = lambda doc: "checked" if doc.upper() in active_docs else ""
-    note = f'<p class="note">{_safe_text(message)}</p>' if message else ""
+    note = f'<p class="note" role="status">{_safe_text(message)}</p>' if message else ""
     return f"""
 <section class="surface">
   <form method="post" action="/download" class="panel section-stack">
@@ -1747,8 +1950,8 @@ def _download_form(
       {note}
       <div class="field-group">
         <label for="source">1) Source</label>
-        <div class="field-hint">Choose the catalogue family.</div>
-        <select id="source" name="source">
+        <div class="field-hint" id="download-source-hint">Choose the catalogue family.</div>
+        <select id="source" name="source" aria-describedby="download-source-hint">
           <option value="edqm" {"selected" if source == "edqm" else ""}>EDQM</option>
           <option value="usp" {"selected" if source == "usp" else ""}>USP</option>
         </select>
@@ -1756,21 +1959,22 @@ def _download_form(
 
       <div class="field-group">
         <label for="codes">2) Catalogue numbers</label>
-        <div class="field-hint">Paste one code per line.</div>
-        <textarea id="codes" name="codes" placeholder="Y0001532&#10;G0400006&#10;1134357">{_safe_text(codes)}</textarea>
+        <div class="field-hint" id="download-codes-hint">One code per line or separated by semicolons. Duplicate rows are processed once.</div>
+        <textarea id="codes" name="codes" data-list-input aria-describedby="download-codes-hint download-codes-count" placeholder="Y0001532&#10;G0400006&#10;1335508">{_safe_text(codes)}</textarea>
+        <div id="download-codes-count" class="field-count" data-count-for="codes">0 items</div>
       </div>
 
-      <div class="field-group">
-        <label>3) Documents</label>
-        <div class="field-hint">Select what should be included in the ZIP.</div>
+      <fieldset class="field-group" aria-describedby="document-types-hint">
+        <legend>3) Documents</legend>
+        <div class="field-hint" id="document-types-hint">Select what should be included in the ZIP.</div>
         <div class="checks">
           <label><input type="checkbox" name="doc_types" value="COA" {checked("COA")}> COA</label>
           <label><input type="checkbox" name="doc_types" value="MSDS" {checked("MSDS")}> MSDS</label>
           <label><input type="checkbox" name="doc_types" value="COO" {checked("COO")}> COO</label>
         </div>
-      </div>
+      </fieldset>
 
-      <button type="submit">Generate ZIP</button>
+      <button type="submit" data-loading-label="Building package…">Generate ZIP</button>
       <div class="microcopy">One batch ZIP, folders by position plus CAS when available, summary table below, manifest kept as-is.</div>
   </form>
   {results_html}
@@ -1837,7 +2041,7 @@ def _render_download_summary_table(source: str, rows: list[dict[str, object]], d
     return (
         '<section class="table-panel">'
         '<div class="table-header"><div><h3>Download Summary</h3><p class="muted">Metadata parsed from the source page plus document outcomes for each code.</p></div></div>'
-        f'<div class="table-wrap"><table><thead><tr>{header_html}</tr></thead><tbody>{"".join(body)}</tbody></table></div>'
+        f'<div class="table-wrap" role="region" aria-label="Download summary" tabindex="0"><table><caption class="sr-only">Document download results by catalogue number</caption><thead><tr>{header_html}</tr></thead><tbody>{"".join(body)}</tbody></table></div>'
         '</section>'
     )
 
@@ -1852,12 +2056,15 @@ def _render_download_results(
     position_count: int = 0,
 ) -> str:
     download_url = f"/download-file?token={_safe_text(download_token)}" if download_token else ""
+    position_label = "position" if position_count == 1 else "positions"
     if position_count and download_url:
         action_html = (
-            f'<a class="button" href="{download_url}" download>Download Batch ZIP</a>'
+            f'<a id="batch-download-link" class="button" href="{download_url}" download>Download Batch ZIP</a>'
         )
         auto_download_script = (
-            f'<script>window.addEventListener("load",function(){{window.location.assign("{download_url}")}});</script>'
+            '<script>window.addEventListener("load",function(){window.setTimeout(function(){'
+            'var link=document.getElementById("batch-download-link");if(link){link.click();}'
+            '},250);});</script>'
         )
     else:
         action_html = '<span class="button secondary" aria-disabled="true">No ZIP Available</span>'
@@ -1869,7 +2076,7 @@ def _render_download_results(
         + '<section class="table-panel">'
         '<div class="result-actions">'
         '<div><h3>Download Result</h3><p class="muted">One ZIP at the top level. Each position is a folder inside the archive.</p></div>'
-        f'<div style="display:flex; gap:10px; flex-wrap:wrap;">{action_html}<span class="status-pill">{position_count} positions packaged</span></div>'
+        f'<div style="display:flex; gap:10px; flex-wrap:wrap;">{action_html}<span class="status-pill">{position_count} {position_label} packaged</span></div>'
         '</div>'
         '<div class="microcopy">Your ZIP should download automatically. If not, click the button above. Link expires after 15 minutes.</div>'
         + '</section>'
@@ -1879,7 +2086,7 @@ def _render_download_results(
 
 
 def _lookup_form(source: str = "both", names: str = "", table_html: str = "", message: str = "") -> str:
-    note = f'<p class="note">{_safe_text(message)}</p>' if message else ""
+    note = f'<p class="note" role="status">{_safe_text(message)}</p>' if message else ""
     return f"""
 <section class="surface">
     <form method="post" action="/lookup" class="panel section-stack">
@@ -1890,8 +2097,8 @@ def _lookup_form(source: str = "both", names: str = "", table_html: str = "", me
       {note}
       <div class="field-group">
         <label for="source">1) Source</label>
-        <div class="field-hint">Use both if unknown.</div>
-        <select id="source" name="source">
+        <div class="field-hint" id="lookup-source-hint">Use both if the catalogue is unknown.</div>
+        <select id="source" name="source" aria-describedby="lookup-source-hint">
           <option value="both" {"selected" if source == "both" else ""}>Both</option>
           <option value="edqm" {"selected" if source == "edqm" else ""}>EDQM</option>
           <option value="usp" {"selected" if source == "usp" else ""}>USP</option>
@@ -1900,11 +2107,12 @@ def _lookup_form(source: str = "both", names: str = "", table_html: str = "", me
 
       <div class="field-group">
         <label for="names">2) Product names</label>
-        <div class="field-hint">One line per item. Mixed-language lines are supported.</div>
-        <textarea id="names" name="names" placeholder="PICOTAMIDE MONOHYDRATE CRS&#10;Cisplatin&#10;Glycerol Monostearate 40-55 CRS">{_safe_text(names)}</textarea>
+        <div class="field-hint" id="lookup-names-hint">One item per line. Mixed-language and noisy copied rows are supported.</div>
+        <textarea id="names" name="names" data-list-input aria-describedby="lookup-names-hint lookup-names-count" placeholder="PICOTAMIDE MONOHYDRATE CRS&#10;Ibuprofen&#10;Glycerol Monostearate 40-55 CRS">{_safe_text(names)}</textarea>
+        <div id="lookup-names-count" class="field-count" data-count-for="names">0 items</div>
       </div>
 
-      <button type="submit" class="secondary">Run Lookup</button>
+      <button type="submit" class="secondary" data-loading-label="Searching catalogues…">Run Lookup</button>
     </form>
   {table_html}
 </section>
@@ -1913,7 +2121,7 @@ def _lookup_form(source: str = "both", names: str = "", table_html: str = "", me
 
 def _batch_lookup_form(source: str = "edqm", codes: str = "", table_html: str = "", message: str = "") -> str:
     source = source.lower().strip()
-    note = f'<p class="note">{_safe_text(message)}</p>' if message else ""
+    note = f'<p class="note" role="status">{_safe_text(message)}</p>' if message else ""
     return f"""
 <section class="surface">
     <form method="post" action="/batches" class="panel section-stack">
@@ -1924,8 +2132,8 @@ def _batch_lookup_form(source: str = "edqm", codes: str = "", table_html: str = 
       {note}
       <div class="field-group">
         <label for="source">1) Source</label>
-        <div class="field-hint">Choose one source at a time.</div>
-        <select id="source" name="source">
+        <div class="field-hint" id="batch-source-hint">Choose one source at a time.</div>
+        <select id="source" name="source" aria-describedby="batch-source-hint">
           <option value="edqm" {"selected" if source == "edqm" else ""}>EDQM</option>
           <option value="usp" {"selected" if source == "usp" else ""}>USP</option>
         </select>
@@ -1933,11 +2141,12 @@ def _batch_lookup_form(source: str = "edqm", codes: str = "", table_html: str = 
 
       <div class="field-group">
         <label for="codes">2) Catalogue numbers</label>
-        <div class="field-hint">Paste one code per line.</div>
-        <textarea id="codes" name="codes" placeholder="I0020000&#10;Y0001532&#10;1335508">{_safe_text(codes)}</textarea>
+        <div class="field-hint" id="batch-codes-hint">One code per line or separated by semicolons.</div>
+        <textarea id="codes" name="codes" data-list-input aria-describedby="batch-codes-hint batch-codes-count" placeholder="I0020000&#10;Y0001532&#10;1335508">{_safe_text(codes)}</textarea>
+        <div id="batch-codes-count" class="field-count" data-count-for="codes">0 items</div>
       </div>
 
-      <button type="submit" class="secondary">Run Batch Lookup</button>
+      <button type="submit" class="secondary" data-loading-label="Checking current batches…">Run Batch Lookup</button>
     </form>
   {table_html}
 </section>
@@ -2100,11 +2309,11 @@ def _lookup_results_table(rows: list[dict[str, str]]) -> str:
         '<button type="button" class="button secondary" onclick="copyFromTextarea(\'catalogue-copy-unique\')">Copy Unique Codes</button>'
         '<button type="button" class="button secondary" onclick="copyFromTextarea(\'catalogue-copy-tsv\')">Copy Table TSV</button>'
         '</div>'
-        f'<textarea id="catalogue-copy-box" class="copy-box compact" readonly>{_safe_text(code_column)}</textarea>'
-        f'<textarea id="catalogue-copy-unique" class="copy-box compact" readonly>{_safe_text(unique_code_column)}</textarea>'
-        f'<textarea id="catalogue-copy-tsv" class="copy-box" readonly style="min-height: 180px;">{_safe_text(tsv_text)}</textarea>'
+        f'<textarea id="catalogue-copy-box" class="copy-box compact" aria-label="Catalogue numbers" readonly>{_safe_text(code_column)}</textarea>'
+        f'<textarea id="catalogue-copy-unique" class="copy-box compact" aria-label="Unique catalogue numbers" readonly>{_safe_text(unique_code_column)}</textarea>'
+        f'<textarea id="catalogue-copy-tsv" class="copy-box" aria-label="Catalogue lookup table as tab-separated values" readonly style="min-height: 180px;">{_safe_text(tsv_text)}</textarea>'
         '</div>'
-        '<div class="table-wrap"><table><thead><tr>'
+        '<div class="table-wrap" role="region" aria-label="Catalogue lookup results" tabindex="0"><table><caption class="sr-only">Catalogue lookup matches</caption><thead><tr>'
         "<th>Original Input</th><th>Matched On</th><th>Match Type</th><th>Source</th><th>Catalogue Number</th><th>Product Name</th><th>CAS</th><th>Current Batch / Lot</th><th>Price</th><th>Availability / In Stock</th><th>Pack / Qty</th><th>Details</th>"
         "</tr></thead><tbody>"
         + "".join(body)
@@ -2242,11 +2451,11 @@ def _batch_results_table(rows: list[dict[str, str]]) -> str:
         '<button type="button" class="button secondary" onclick="copyFromTextarea(\'batch-copy-unique\')">Copy Unique Batch Numbers</button>'
         '<button type="button" class="button secondary" onclick="copyFromTextarea(\'batch-copy-tsv\')">Copy Table TSV</button>'
         '</div>'
-        f'<textarea id="batch-copy-box" class="copy-box compact" readonly>{_safe_text(batch_column)}</textarea>'
-        f'<textarea id="batch-copy-unique" class="copy-box compact" readonly>{_safe_text(unique_batch_column)}</textarea>'
-        f'<textarea id="batch-copy-tsv" class="copy-box" readonly style="min-height: 180px;">{_safe_text(tsv_text)}</textarea>'
+        f'<textarea id="batch-copy-box" class="copy-box compact" aria-label="Current batch numbers" readonly>{_safe_text(batch_column)}</textarea>'
+        f'<textarea id="batch-copy-unique" class="copy-box compact" aria-label="Unique current batch numbers" readonly>{_safe_text(unique_batch_column)}</textarea>'
+        f'<textarea id="batch-copy-tsv" class="copy-box" aria-label="Current batch table as tab-separated values" readonly style="min-height: 180px;">{_safe_text(tsv_text)}</textarea>'
         '</div>'
-        '<div class="table-wrap"><table><thead><tr>'
+        '<div class="table-wrap" role="region" aria-label="Current batch results" tabindex="0"><table><caption class="sr-only">Current batch results by catalogue number</caption><thead><tr>'
         + header_html
         + "</tr></thead><tbody>"
         + "".join(body)
@@ -2257,10 +2466,37 @@ def _batch_results_table(rows: list[dict[str, str]]) -> str:
 @app.get("/", response_class=HTMLResponse)
 def landing_page() -> HTMLResponse:
     body = """
+<section class="hero-shell">
+  <div class="hero-grid">
+    <div class="hero-copy">
+      <span class="eyebrow">EDQM + USP workspace</span>
+      <h1>From catalogue number to a clean document package.</h1>
+      <p class="lede">Find regulatory positions, verify current lots, and collect public COA, MSDS, and COO files without opening dozens of source pages.</p>
+      <div class="hero-actions">
+        <a class="button" href="/download">Download documents</a>
+        <a class="button ghost" href="/lookup">Find a catalogue number</a>
+      </div>
+      <div class="task-strip" aria-label="Core capabilities">
+        <span class="task-pill"><b>01</b> Resolve</span>
+        <span class="task-pill"><b>02</b> Retrieve</span>
+        <span class="task-pill"><b>03</b> Package</span>
+      </div>
+    </div>
+    <aside class="hero-aside" aria-label="Workspace benefits">
+      <h3>Built for repeatable batches</h3>
+      <ul>
+        <li>One input row per position</li>
+        <li>Source metadata beside every result</li>
+        <li>Manifest records missing public files</li>
+        <li>ZIP folders use readable product names</li>
+      </ul>
+    </aside>
+  </div>
+</section>
 <section class="surface landing-shell">
   <div class="landing-heading">
-    <h1>Choose a function.</h1>
-    <p>Open the workflow you need.</p>
+    <h2>Choose your starting point</h2>
+    <p>Each workflow keeps the original input visible and returns copy-ready results.</p>
   </div>
   <div class="grid">
     <section class="card">

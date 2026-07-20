@@ -31,7 +31,10 @@ This app does it in one run:
 ### USP
 
 - Search USP positions via public product/search APIs.
+- Fall back to the server-rendered USP product state if the product API is unavailable or changes format.
+- Use an honest HTTP client identity with retry handling (USP rejects incomplete browser impersonation at its edge).
 - Download `COA` and `MSDS` via public static/document links.
+- Validate PDF signatures before saving, so upstream error payloads are never packaged as documents.
 - USP `COO` behavior:
   - Create country text file only.
   - Example: `United States.txt`.
@@ -58,6 +61,7 @@ This app does it in one run:
 - Dedicated downloader page on the same domain.
 - Dedicated bulk catalogue-finder page on the same domain.
 - Copy-ready lookup output for catalogue numbers and full table data.
+- Responsive, keyboard-accessible workflows with input counts, loading feedback, and accessible result tables.
 - Built on FastAPI for Vercel deployment, while reusing the same EDQM/USP downloader logic.
 
 ## Requirements

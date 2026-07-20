@@ -6,14 +6,17 @@ from public endpoints/pages without login.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import quote, unquote, urljoin
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from src.config import DOWNLOAD_DIR, HEADLESS
 
@@ -26,6 +29,7 @@ USP_STATIC_BASE = "https://static.usp.org"
 
 REQUEST_TIMEOUT = (8, 12)
 DOWNLOAD_REQUEST_TIMEOUT = (10, 25)
+RETRYABLE_STATUS_CODES = (429, 500, 502, 503, 504)
 
 
 @dataclass
@@ -78,6 +82,7 @@ class USPDownloader:
 
     _session: requests.Session | None = field(default=None, repr=False)
     _current_product: USPProduct | None = field(default=None, repr=False)
+    _last_error: str = field(default="", repr=False)
 
     def __enter__(self):
         self.start()
@@ -89,17 +94,30 @@ class USPDownloader:
     def start(self):
         (self.download_dir / "usp").mkdir(parents=True, exist_ok=True)
         session = requests.Session()
+        retries = Retry(
+            total=2,
+            connect=2,
+            read=2,
+            status=2,
+            backoff_factor=0.35,
+            status_forcelist=RETRYABLE_STATUS_CODES,
+            allowed_methods=frozenset({"GET"}),
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(max_retries=retries)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
         session.headers.update(
             {
-                "User-Agent": (
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/132.0.0.0 Safari/537.36"
-                ),
-                "Accept": "*/*",
+                # Do not impersonate a browser here. USP's Akamai rules reject
+                # incomplete browser fingerprints, while the public API accepts
+                # the honest requests user-agent supplied by this session.
+                "Accept": "application/json, application/pdf;q=0.9, text/html;q=0.8, */*;q=0.7",
+                "Accept-Language": "en-US,en;q=0.8",
             }
         )
         self._session = session
+        self._last_error = ""
         logger.info("USP HTTP session started")
 
     def stop(self):
@@ -115,6 +133,7 @@ class USPDownloader:
 
     def search_product(self, product_code: str) -> bool:
         """Resolve a USP product from a catalogue number."""
+        self._last_error = ""
         product = self._fetch_product(product_code)
 
         if not product:
@@ -123,10 +142,15 @@ class USPDownloader:
                 product = self._fetch_product(product_id)
 
         if not product:
-            logger.warning(f"USP product not found: {product_code}")
+            logger.warning(
+                "USP product lookup failed for %s: %s",
+                product_code,
+                self._last_error or "Product not found",
+            )
             self._current_product = None
             return False
 
+        self._last_error = ""
         self._current_product = product
         logger.info(
             "Resolved USP product %s -> %s (%s)",
@@ -145,7 +169,7 @@ class USPDownloader:
         doc_type = doc_type.upper()
 
         if not self._ensure_current_product(product_code):
-            result.error = "Product not found"
+            result.error = self._last_error or "Product not found"
             return result
 
         assert self._current_product is not None
@@ -249,10 +273,10 @@ class USPDownloader:
                         product_code=code,
                         name=name or code,
                         metadata={
-                            "price": self._first_attr_value(attrs, "product.listPrice"),
+                            "price": self._format_price(self._first_attr_value(attrs, "product.listPrice")),
                             "current_lot": self._first_attr_value(attrs, "USPProductType.usp_current_lot_number"),
-                            "in_stock": self._first_attr_value(attrs, "USPProductType.usp_in_stock"),
-                            "ready_to_ship": self._first_attr_value(attrs, "USPProductType.usp_ready_to_ship"),
+                            "in_stock": self._format_flag(self._first_attr_value(attrs, "USPProductType.usp_in_stock")),
+                            "ready_to_ship": self._format_flag(self._first_attr_value(attrs, "USPProductType.usp_ready_to_ship")),
                             "packing_size": self._first_attr_value(attrs, "USPProductType.usp_packing_size"),
                             "uom": self._first_attr_value(attrs, "USPProductType.usp_uom"),
                             "cas": self._first_attr_value(attrs, "USPProductType.usp_cas_number"),
@@ -349,32 +373,120 @@ class USPDownloader:
             return urljoin(USP_BASE_URL, self._current_product.route or "")
         return ""
 
+    def get_last_error(self) -> str:
+        """Return a user-facing explanation for the most recent lookup failure."""
+        return self._last_error
+
     def _fetch_product(self, product_code: str) -> USPProduct | None:
         session = self._require_session()
         code = product_code.strip()
         if not code:
+            self._last_error = "Enter a USP catalogue number"
             return None
 
-        url = f"{USP_PRODUCT_API}/{code}"
+        url = f"{USP_PRODUCT_API}/{quote(code, safe='')}"
         try:
             resp = session.get(url, timeout=REQUEST_TIMEOUT)
         except requests.RequestException as exc:
             logger.warning("USP product request failed for %s: %s", code, exc)
-            return None
+            self._last_error = f"USP product service could not be reached: {exc}"
+            return self._fetch_product_page(code)
 
         if resp.status_code == 404:
-            return None
+            self._last_error = "Product not found in the USP catalogue"
+            return self._fetch_product_page(code)
         if not resp.ok:
             logger.warning("USP product request returned %s for %s", resp.status_code, code)
-            return None
+            self._last_error = f"USP product service returned HTTP {resp.status_code}"
+            return self._fetch_product_page(code)
 
         try:
             payload = resp.json()
         except ValueError:
             logger.warning("USP product response is not JSON for %s", code)
+            self._last_error = "USP product service returned an unreadable response"
+            return self._fetch_product_page(code)
+
+        product = self._product_from_payload(payload, code)
+        if not product:
+            self._last_error = "USP product response did not contain product data"
+            return self._fetch_product_page(code)
+        return product
+
+    def _fetch_product_page(self, product_code: str) -> USPProduct | None:
+        """Fallback to the server-rendered product page when the JSON API changes."""
+        session = self._require_session()
+        code = product_code.strip()
+        url = f"{USP_BASE_URL}/product/{quote(code, safe='')}"
+        try:
+            resp = session.get(url, timeout=REQUEST_TIMEOUT)
+        except requests.RequestException as exc:
+            logger.warning("USP product page request failed for %s: %s", code, exc)
+            self._last_error = f"USP product page could not be reached: {exc}"
             return None
 
-        repository_id = str(payload.get("repositoryId") or payload.get("id") or code)
+        if resp.status_code == 404:
+            self._last_error = "Product not found in the USP catalogue"
+            return None
+        if not resp.ok:
+            self._last_error = f"USP product page returned HTTP {resp.status_code}"
+            return None
+
+        product = self._product_from_page_html(resp.text, code)
+        if not product:
+            self._last_error = "USP product page format was not recognized"
+        return product
+
+    def _product_from_page_html(self, page_html: str, product_code: str) -> USPProduct | None:
+        state_match = re.search(
+            r'window\.state\s*=\s*JSON\.parse\(decodeURI\("([^"]+)"\)\)',
+            page_html or "",
+        )
+        if not state_match:
+            return None
+
+        try:
+            state = json.loads(unquote(state_match.group(1)))
+        except (ValueError, TypeError):
+            return None
+
+        requested = self._compact(product_code)
+        fallback_payload: dict | None = None
+
+        def find_product(value) -> dict | None:
+            nonlocal fallback_payload
+            if isinstance(value, dict):
+                candidate_id = value.get("repositoryId") or value.get("id")
+                if (
+                    candidate_id
+                    and self._compact(str(candidate_id)) == requested
+                    and ("displayName" in value or "usp_lot_details" in value)
+                ):
+                    if "usp_lot_details" in value:
+                        return value
+                    if fallback_payload is None:
+                        fallback_payload = value
+                for child in value.values():
+                    found = find_product(child)
+                    if found:
+                        return found
+            elif isinstance(value, list):
+                for child in value:
+                    found = find_product(child)
+                    if found:
+                        return found
+            return None
+
+        payload = find_product(state) or fallback_payload
+        return self._product_from_payload(payload, product_code) if payload else None
+
+    def _product_from_payload(self, payload: dict, fallback_code: str) -> USPProduct | None:
+        if not isinstance(payload, dict):
+            return None
+
+        repository_id = str(payload.get("repositoryId") or payload.get("id") or fallback_code)
+        if not repository_id:
+            return None
         route = str(payload.get("route") or f"/product/{repository_id}")
         display_name = str(payload.get("displayName") or repository_id)
         category_type = str(payload.get("usp_product_category_type") or "")
@@ -408,6 +520,7 @@ class USPDownloader:
             payload = resp.json()
         except (requests.RequestException, ValueError) as exc:
             logger.warning("USP search request failed for %s: %s", code, exc)
+            self._last_error = f"USP catalogue search failed: {exc}"
             return ""
 
         records = payload.get("resultsList", {}).get("records", [])
@@ -423,6 +536,8 @@ class USPDownloader:
                         candidates.append(str(values[0]))
 
         if not candidates:
+            if not self._last_error:
+                self._last_error = "Product not found in the USP catalogue"
             return ""
 
         requested = self._compact(code)
@@ -430,7 +545,10 @@ class USPDownloader:
             if self._compact(candidate) == requested:
                 return candidate
 
-        return candidates[0]
+        # Catalogue downloads must never silently fall through to a merely
+        # related search result: that could package documents for the wrong item.
+        self._last_error = "No exact USP catalogue-number match was found"
+        return ""
 
     def _build_coa_candidates(self, product: USPProduct) -> list[str]:
         product_id = product.repository_id
@@ -501,6 +619,10 @@ class USPDownloader:
             return None, f"Received HTML instead of document for {url}"
 
         ext = self._guess_extension(url, content_type)
+        if not resp.content:
+            return None, f"Received an empty document for {url}"
+        if ext == ".pdf" and not resp.content.lstrip().startswith(b"%PDF-"):
+            return None, f"Received an invalid PDF payload for {url}"
         filename = f"{self._safe_filename(base_name)}{ext}"
         output = self.download_dir / "usp" / filename
         output.write_bytes(resp.content)
@@ -595,6 +717,26 @@ class USPDownloader:
     @staticmethod
     def _compact(value: str) -> str:
         return re.sub(r"[^a-z0-9]+", "", (value or "").lower())
+
+    @staticmethod
+    def _format_price(value: str) -> str:
+        raw = (value or "").strip()
+        if not raw:
+            return ""
+        try:
+            return f"${float(raw.replace(',', '')):,.2f}"
+        except ValueError:
+            return raw
+
+    @staticmethod
+    def _format_flag(value: str) -> str:
+        raw = (value or "").strip()
+        lowered = raw.lower()
+        if lowered in {"true", "y", "yes", "1"}:
+            return "Yes"
+        if lowered in {"false", "n", "no", "0"}:
+            return "No"
+        return raw
 
     @staticmethod
     def _unique(values: list[str]) -> list[str]:

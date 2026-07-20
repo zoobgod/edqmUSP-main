@@ -103,11 +103,14 @@ def _download_documents(source: str, codes: list[str], doc_types: list[str], bas
                             ):
                                 st.markdown(f"[Open Sigma SDS for {code}]({_sigma_sds_url(code)})")
             else:
+                error_getter = getattr(downloader, "get_last_error", None)
+                lookup_error = error_getter() if callable(error_getter) else ""
+                lookup_error = lookup_error or "Product not found"
                 for doc in doc_types:
                     done += 1
                     progress.progress(done / total)
                     with results_container:
-                        st.error(f"{code} {doc}: Product not found")
+                        st.error(f"{code} {doc}: {lookup_error}")
 
         status.success(f"{source.upper()} downloads complete!")
 
