@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 import base64
 import html
 import re
@@ -37,6 +37,7 @@ from src.services.cas import (
     resolve_cas_number as _svc_resolve_cas_number,
 )
 from src.services.lookup import (
+    LookupSourceError,
     lookup_query_candidates as _svc_lookup_query_candidates,
     search_lookup_candidates as _svc_search_lookup_candidates,
 )
@@ -48,6 +49,11 @@ _DOWNLOAD_CACHE: dict[str, dict[str, object]] = {}
 LOOKUP_MAX_WORKERS = 4
 LOOKUP_ENRICH_WORKERS = 4
 LOOKUP_ENRICHMENT_MAX_NAMES = 10
+# Wall-clock cap for fetching per-match details in one lookup request. Products still
+# pending when it expires are shown as "Unavailable" instead of stalling the request.
+LOOKUP_ENRICH_BUDGET_SECONDS = 45
+# Whole-request cap for the catalogue finder, kept well under Vercel's 300 s maxDuration.
+LOOKUP_REQUEST_BUDGET_SECONDS = 200
 DOWNLOAD_MAX_WORKERS = 3
 BATCH_LOOKUP_MAX_WORKERS = 4
 INLINE_ZIP_MAX_BYTES = 3 * 1024 * 1024
@@ -1497,7 +1503,7 @@ def _edqm_lookup_enrichment(downloader, product_code: str) -> dict[str, str]:
     if not downloader.search_product(product_code):
         return {}
 
-    summary = _edqm_detail_summary(downloader)
+    summary = _edqm_detail_summary(downloader, allow_external_cas=False)
     return {
         "availability": summary.get("availability", ""),
         "price": summary.get("price", ""),
@@ -1520,7 +1526,7 @@ def _edqm_country_of_origin(downloader, product_code: str) -> str:
         return ""
 
 
-def _enrich_codes(source: str, codes: list[str]) -> dict[str, dict[str, str]]:
+def _enrich_codes(source: str, codes: list[str], deadline: float | None = None) -> dict[str, dict[str, str]]:
     """Fetch detail metadata (incl. country of origin) for several codes in parallel.
 
     Each worker owns its own downloader because downloaders keep per-product state.
@@ -1535,7 +1541,10 @@ def _enrich_codes(source: str, codes: list[str]) -> dict[str, dict[str, str]]:
         enrich_fn = _usp_lookup_enrichment
 
     unique_codes = list(dict.fromkeys(code for code in codes if code))
-    if not unique_codes:
+    budget = LOOKUP_ENRICH_BUDGET_SECONDS
+    if deadline is not None:
+        budget = min(budget, deadline - time.monotonic())
+    if not unique_codes or budget <= 0:
         return {}
 
     def enrich(code: str) -> dict[str, str]:
@@ -1544,13 +1553,19 @@ def _enrich_codes(source: str, codes: list[str]) -> dict[str, dict[str, str]]:
                 return enrich_fn(downloader, code)
 
     results: dict[str, dict[str, str]] = {}
-    with ThreadPoolExecutor(max_workers=min(LOOKUP_ENRICH_WORKERS, len(unique_codes))) as executor:
-        future_map = {executor.submit(enrich, code): code for code in unique_codes}
-        for future in as_completed(future_map):
+    executor = ThreadPoolExecutor(max_workers=min(LOOKUP_ENRICH_WORKERS, len(unique_codes)))
+    future_map = {executor.submit(enrich, code): code for code in unique_codes}
+    try:
+        for future in as_completed(future_map, timeout=budget):
             try:
                 results[future_map[future]] = future.result()
             except Exception:
                 results[future_map[future]] = {}
+    except FuturesTimeoutError:
+        pass  # leave slow products without details; the table marks them "Unavailable"
+    finally:
+        # Do not wait for stragglers; queued work is cancelled, running requests finish in the background.
+        executor.shutdown(wait=False, cancel_futures=True)
     return results
 
 
@@ -1564,7 +1579,7 @@ def _default_detail_url(source: str, code: str) -> str:
 def _usp_lookup_enrichment(downloader, product_code: str) -> dict[str, str]:
     if not downloader.search_product(product_code):
         return {}
-    summary = _usp_product_summary(downloader)
+    summary = _usp_product_summary(downloader, allow_external_cas=False)
     summary["detail_url"] = getattr(downloader, "get_detail_url", lambda _code: "")(product_code)
     return summary
 
@@ -1574,6 +1589,7 @@ def _lookup_rows_for_source(
     query: str,
     limit: int = 8,
     include_lookup_enrichment: bool = True,
+    deadline: float | None = None,
 ) -> list[dict[str, str]]:
     source = source.lower()
 
@@ -1601,7 +1617,7 @@ def _lookup_rows_for_source(
                     ]
 
                 enrichment_by_code = (
-                    _enrich_codes("edqm", [match.product_code for match in matches])
+                    _enrich_codes("edqm", [match.product_code for match in matches], deadline)
                     if include_lookup_enrichment
                     else {}
                 )
@@ -1643,7 +1659,7 @@ def _lookup_rows_for_source(
                 ]
 
             enrichment_by_code = (
-                _enrich_codes("usp", [match.product_code for match in matches])
+                _enrich_codes("usp", [match.product_code for match in matches], deadline)
                 if include_lookup_enrichment
                 else {}
             )
@@ -1836,7 +1852,7 @@ def _is_coa_unavailable_online(doc_type: str, error: str) -> bool:
     )
 
 
-def _edqm_detail_summary(downloader) -> dict[str, str]:
+def _edqm_detail_summary(downloader, allow_external_cas: bool = True) -> dict[str, str]:
     current = getattr(downloader, "_current", None)
     extractor = getattr(downloader, "_extract_detail_fields", None)
     if not current or not callable(extractor):
@@ -1854,12 +1870,16 @@ def _edqm_detail_summary(downloader) -> dict[str, str]:
         "storage": fields.get("EDQM long term storage conditions", ""),
         "unit_quantity": fields.get("Unit quantity per vial", ""),
         "cas": cas_number
-        or _resolve_cas_number(
-            "edqm",
-            downloader,
-            current.code,
-            fields.get("Name") or current.name or current.code,
-            allow_name_fallback=False,
+        or (
+            _resolve_cas_number(
+                "edqm",
+                downloader,
+                current.code,
+                fields.get("Name") or current.name or current.code,
+                allow_name_fallback=False,
+            )
+            if allow_external_cas
+            else ""
         ),
     }
 
@@ -1924,7 +1944,7 @@ def _format_lot_history(lots: list) -> str:
     return "; ".join(parts)
 
 
-def _usp_product_summary(downloader) -> dict[str, str]:
+def _usp_product_summary(downloader, allow_external_cas: bool = True) -> dict[str, str]:
     product = getattr(downloader, "_current_product", None)
     if not product:
         return {}
@@ -1960,12 +1980,16 @@ def _usp_product_summary(downloader) -> dict[str, str]:
         "packing_size": search_summary.get("packing_size", ""),
         "uom": search_summary.get("uom", ""),
         "cas": search_summary.get("cas", "")
-        or _resolve_cas_number(
-            "usp",
-            downloader,
-            product.repository_id,
-            product.display_name or product.repository_id,
-            allow_name_fallback=False,
+        or (
+            _resolve_cas_number(
+                "usp",
+                downloader,
+                product.repository_id,
+                product.display_name or product.repository_id,
+                allow_name_fallback=False,
+            )
+            if allow_external_cas
+            else ""
         ),
         "molecular_formula": search_summary.get("molecular_formula", ""),
     }
@@ -2183,38 +2207,52 @@ def _lookup_catalogue_numbers(source: str, names: list[str], limit: int = 8) -> 
 
     ordered_results: dict[tuple[int, int], list[dict[str, str]]] = {}
     include_lookup_enrichment = len(names) <= LOOKUP_ENRICHMENT_MAX_NAMES
-    max_workers = min(LOOKUP_MAX_WORKERS, len(tasks))
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_map = {
-            executor.submit(
-                _lookup_rows_for_source,
-                source_name,
-                query,
-                limit,
-                include_lookup_enrichment,
-            ): (source_index, query_index)
-            for source_index, query_index, source_name, query in tasks
-        }
-        for future in as_completed(future_map):
+    deadline = time.monotonic() + LOOKUP_REQUEST_BUDGET_SECONDS
+
+    def error_row(key: tuple[int, int], message: str) -> list[dict[str, str]]:
+        return [
+            {
+                "query": names[key[1]],
+                "matched_on": "",
+                "match_type": "Error",
+                "rank": "",
+                "source": requested_sources[key[0]].upper(),
+                "code": "",
+                "name": message,
+                "cas": "",
+                "enrichment": {},
+            }
+        ]
+
+    executor = ThreadPoolExecutor(max_workers=min(LOOKUP_MAX_WORKERS, len(tasks)))
+    future_map = {
+        executor.submit(
+            _lookup_rows_for_source,
+            source_name,
+            query,
+            limit,
+            include_lookup_enrichment,
+            deadline,
+        ): (source_index, query_index)
+        for source_index, query_index, source_name, query in tasks
+    }
+    try:
+        # Small grace period so tasks that are finishing their details can still return.
+        for future in as_completed(future_map, timeout=LOOKUP_REQUEST_BUDGET_SECONDS + 30):
             key = future_map[future]
-            source_name = requested_sources[key[0]].upper()
-            query = names[key[1]]
             try:
                 ordered_results[key] = future.result()
             except Exception as exc:
-                ordered_results[key] = [
-                    {
-                        "query": query,
-                        "matched_on": "",
-                        "match_type": "Error",
-                        "rank": "",
-                        "source": source_name,
-                        "code": "",
-                        "name": f"Lookup failed: {exc}",
-                        "cas": "",
-                        "enrichment": {},
-                    }
-                ]
+                message = str(exc) if isinstance(exc, LookupSourceError) else f"Lookup failed: {exc}"
+                ordered_results[key] = error_row(key, message)
+    except FuturesTimeoutError:
+        pass
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+    for key in future_map.values():
+        if key not in ordered_results:
+            ordered_results[key] = error_row(key, "Timed out: the catalogue websites are responding slowly. Run fewer names at once.")
 
     for key in sorted(ordered_results):
         rows.extend(ordered_results[key])

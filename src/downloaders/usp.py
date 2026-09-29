@@ -83,6 +83,7 @@ class USPDownloader:
     _session: requests.Session | None = field(default=None, repr=False)
     _current_product: USPProduct | None = field(default=None, repr=False)
     _last_error: str = field(default="", repr=False)
+    search_error: str = field(default="", repr=False)
 
     def __enter__(self):
         self.start()
@@ -237,12 +238,14 @@ class USPDownloader:
         if not term:
             return []
 
+        self.search_error = ""
         try:
             resp = session.get(USP_SEARCH_API, params={"Ntt": term}, timeout=REQUEST_TIMEOUT)
             resp.raise_for_status()
             payload = resp.json()
         except (requests.RequestException, ValueError) as exc:
             logger.warning("USP name search request failed for %s: %s", term, exc)
+            self.search_error = "USP search did not respond in time. Try again in a moment."
             return []
 
         records = payload.get("resultsList", {}).get("records", [])

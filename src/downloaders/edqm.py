@@ -81,6 +81,7 @@ class EDQMDownloader:
     _session: requests.Session | None = field(default=None, repr=False)
     _current: ProductContext | None = field(default=None, repr=False)
     _sigma_reachable: bool | None = field(default=None, repr=False)
+    search_error: str = field(default="", repr=False)
 
     def __enter__(self):
         self.start()
@@ -487,11 +488,13 @@ class EDQMDownloader:
             "vtUserName": term,
         }
 
+        self.search_error = ""
         try:
             resp = session.get(EDQM_SEARCH_URL, params=params, timeout=REQUEST_TIMEOUT)
             resp.raise_for_status()
         except requests.RequestException as exc:
             logger.warning("EDQM name search request failed for %s: %s", term, exc)
+            self.search_error = "EDQM search did not respond in time. Try again in a moment."
             return []
 
         return self._extract_search_matches(resp.text, term, limit)

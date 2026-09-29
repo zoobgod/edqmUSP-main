@@ -93,6 +93,10 @@ def lookup_query_candidates(raw_query: str) -> list[str]:
     return candidates
 
 
+class LookupSourceError(RuntimeError):
+    """The catalogue website failed to answer, so "no match" would be misleading."""
+
+
 def search_lookup_candidates(downloader, raw_query: str, limit: int = 8) -> tuple[list, str]:
     attempted: list[str] = []
     for candidate in lookup_query_candidates(raw_query):
@@ -100,6 +104,10 @@ def search_lookup_candidates(downloader, raw_query: str, limit: int = 8) -> tupl
         matches = downloader.search_products_by_name(candidate, limit=limit)
         if matches:
             return matches, candidate
+        # Stop early: every further candidate would hit the same unresponsive host.
+        search_error = getattr(downloader, "search_error", "")
+        if isinstance(search_error, str) and search_error:
+            raise LookupSourceError(search_error)
 
     fallback = attempted[0] if attempted else raw_query.strip()
     return [], fallback
