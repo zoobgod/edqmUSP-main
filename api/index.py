@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import base64
 import html
 import re
 import sys
 import time
-import zipfile
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
@@ -30,7 +30,6 @@ from src.services.bundles import (
     build_position_zip as _svc_build_position_zip,
     bundle_name as _svc_bundle_name,
     resolve_position_name as _svc_resolve_position_name,
-    safe_file_part as _svc_safe_file_part,
     zip_member_name as _svc_zip_member_name,
 )
 from src.services.cas import (
@@ -47,7 +46,13 @@ DOWNLOAD_CACHE_TTL_SECONDS = 900
 DOWNLOAD_CACHE_MAX_ENTRIES = 20
 _DOWNLOAD_CACHE: dict[str, dict[str, object]] = {}
 LOOKUP_MAX_WORKERS = 4
+LOOKUP_ENRICH_WORKERS = 4
+LOOKUP_ENRICHMENT_MAX_NAMES = 10
 DOWNLOAD_MAX_WORKERS = 3
+BATCH_LOOKUP_MAX_WORKERS = 4
+INLINE_ZIP_MAX_BYTES = 3 * 1024 * 1024
+EDQM_DETAIL_URL_TEMPLATE = "https://crs.edqm.eu/db/4DCGI/View={code}"
+USP_DETAIL_URL_TEMPLATE = "https://store.usp.org/product/{code}"
 
 APP_CSS = """
 <style>
@@ -117,8 +122,8 @@ body::before {
   position: fixed;
   inset: 0;
   background-image:
-    linear-gradient(rgba(93, 76, 58, 0.03) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(93, 76, 58, 0.03) 1px, transparent 1px);
+    linear-gradient(rgba(45, 70, 107, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(45, 70, 107, 0.035) 1px, transparent 1px);
   background-size: 28px 28px;
   mask-image: radial-gradient(circle at center, black 55%, transparent 92%);
   pointer-events: none;
@@ -289,8 +294,8 @@ a {
   width: fit-content;
   padding: 8px 12px;
   border-radius: 999px;
-  border: 1px solid rgba(13, 92, 99, 0.16);
-  background: rgba(13, 92, 99, 0.08);
+  border: 1px solid rgba(27, 78, 216, 0.16);
+  background: rgba(27, 78, 216, 0.08);
   color: var(--primary);
   font-size: 0.82rem;
   font-weight: 800;
@@ -405,7 +410,7 @@ a {
 }
 .card:hover {
   transform: translateY(-3px);
-  box-shadow: 0 16px 36px rgba(50, 35, 20, 0.10);
+  box-shadow: 0 16px 36px rgba(15, 29, 62, 0.12);
   border-color: var(--line-strong);
 }
 .card > .button,
@@ -445,13 +450,13 @@ a {
   letter-spacing: 0.01em;
   text-decoration: none;
   cursor: pointer;
-  box-shadow: 0 10px 24px rgba(13, 92, 99, 0.18);
+  box-shadow: 0 10px 24px rgba(27, 78, 216, 0.18);
   transition: transform 160ms ease, box-shadow 160ms ease, filter 160ms ease;
 }
 .button:hover, button:hover {
   transform: translateY(-1px);
   filter: saturate(1.06);
-  box-shadow: 0 14px 28px rgba(13, 92, 99, 0.22);
+  box-shadow: 0 14px 28px rgba(27, 78, 216, 0.24);
 }
 button:disabled {
   cursor: wait;
@@ -478,13 +483,23 @@ button:disabled {
 @keyframes spin { to { transform: rotate(360deg); } }
 .button.secondary, button.secondary {
   background: linear-gradient(135deg, var(--dark), var(--dark-2));
-  box-shadow: 0 10px 24px rgba(166, 106, 43, 0.18);
+  box-shadow: 0 10px 24px rgba(17, 24, 39, 0.18);
 }
-.button.ghost {
+.button.ghost, button.ghost {
   background: rgba(255,255,255,0.74);
   color: var(--ink);
   border: 1px solid var(--line);
   box-shadow: none;
+}
+.button.ghost:hover, button.ghost:hover {
+  background: #fff;
+  border-color: var(--line-strong);
+  box-shadow: var(--shadow-soft);
+}
+.button.small, button.small {
+  padding: 9px 14px;
+  border-radius: 12px;
+  font-size: 0.9rem;
 }
 .surface {
   margin-top: 22px;
@@ -540,7 +555,7 @@ legend {
   margin: 14px 0 8px;
   letter-spacing: 0.01em;
 }
-textarea, select, input[type="text"] {
+textarea, select, input[type="text"], input[type="search"] {
   width: 100%;
   padding: 14px 16px;
   border-radius: 16px;
@@ -551,9 +566,9 @@ textarea, select, input[type="text"] {
   outline: none;
   transition: border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
 }
-textarea:focus, select:focus, input[type="text"]:focus {
-  border-color: rgba(13, 92, 99, 0.35);
-  box-shadow: 0 0 0 4px rgba(13, 92, 99, 0.10);
+textarea:focus, select:focus, input[type="text"]:focus, input[type="search"]:focus {
+  border-color: rgba(27, 78, 216, 0.4);
+  box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.14);
   background: #fff;
 }
 textarea {
@@ -587,7 +602,11 @@ textarea {
   accent-color: var(--primary);
 }
 .table-wrap {
-  overflow-x: auto;
+  overflow: auto;
+  max-height: 72vh;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(255,255,255,0.92);
 }
 .copy-tools {
   display: grid;
@@ -664,32 +683,146 @@ table {
   width: 100%;
   border-collapse: separate;
   border-spacing: 0;
-  background: rgba(255,255,255,0.92);
-  border: 1px solid var(--line);
-  border-radius: 18px;
-  overflow: hidden;
+  font-size: 0.94rem;
 }
 th, td {
-  padding: 14px 16px;
-  border-bottom: 1px solid rgba(106, 91, 73, 0.10);
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(45, 70, 107, 0.09);
   text-align: left;
   vertical-align: top;
 }
 th {
-  background: rgba(239, 229, 214, 0.82);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #eef3fc;
   color: var(--muted);
-  font-size: 0.82rem;
+  font-size: 0.76rem;
   letter-spacing: 0.06em;
   text-transform: uppercase;
+  white-space: nowrap;
+  box-shadow: inset 0 -1px 0 var(--line);
 }
-tbody tr:nth-child(even) td {
-  background: rgba(252, 248, 241, 0.56);
-}
+tbody tr:last-child td { border-bottom: 0; }
 tbody tr:hover td {
-  background: rgba(13, 92, 99, 0.05);
+  background: rgba(59, 130, 246, 0.06);
+}
+tbody tr.group-start:not(:first-child) td {
+  border-top: 2px solid rgba(45, 70, 107, 0.16);
+}
+tbody tr.group-cont .query-cell {
+  color: transparent;
+  user-select: none;
+}
+tbody tr.group-cont .query-cell::before {
+  content: "↳";
+  color: var(--muted-2);
+}
+tbody tr.row-fail td {
+  background: rgba(209, 73, 91, 0.035);
+}
+.query-cell { max-width: 220px; font-weight: 700; }
+.name-cell { min-width: 200px; }
+.nowrap { white-space: nowrap; }
+.cell-sub {
+  margin-top: 4px;
+  color: var(--muted-2);
+  font-size: 0.78rem;
+  max-width: 200px;
+}
+.country-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(22, 163, 74, 0.1);
+  border: 1px solid rgba(22, 163, 74, 0.22);
+  color: #14532d;
+  font-weight: 700;
+  font-size: 0.86rem;
+  white-space: nowrap;
+}
+.country-chip::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #16a34a;
+}
+.source-tag {
+  display: inline-block;
+  padding: 3px 8px;
+  border-radius: 8px;
+  font-size: 0.74rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  background: rgba(27, 78, 216, 0.1);
+  color: #1b4ed8;
+}
+.source-tag.usp {
+  background: rgba(124, 58, 237, 0.1);
+  color: #6d28d9;
+}
+.pill-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.results-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.filter-box {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  flex: 1 1 320px;
+}
+.filter-box input[type="search"] {
+  max-width: 340px;
+  padding: 10px 14px;
+  border-radius: 12px;
+}
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--muted);
+  cursor: pointer;
+}
+.toggle input { accent-color: var(--primary); }
+.raw-export {
+  margin-bottom: 14px;
+}
+.raw-export summary {
+  cursor: pointer;
+  width: fit-content;
+  color: var(--muted);
+  font-size: 0.88rem;
+  font-weight: 700;
+}
+.raw-export .copy-tools { margin-top: 12px; }
+.raw-label {
+  margin: 4px 0 -8px;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+.empty-filter {
+  padding: 18px;
+  text-align: center;
+  color: var(--muted);
 }
 .status-ok {
-  color: #165f58;
+  color: #163c8c;
   font-weight: 700;
 }
 .status-fail {
@@ -717,8 +850,65 @@ tbody tr:hover td {
   margin-top: 14px;
   padding: 14px 16px;
   border-radius: 16px;
-  border: 1px solid rgba(166, 106, 43, 0.18);
-  background: rgba(201, 139, 60, 0.10);
+  border: 1px solid rgba(27, 78, 216, 0.18);
+  background: rgba(59, 130, 246, 0.08);
+  color: #1e3a8a;
+}
+.note.error {
+  border-color: rgba(209, 73, 91, 0.28);
+  background: rgba(209, 73, 91, 0.08);
+  color: #96273a;
+}
+.note.warn {
+  border-color: rgba(201, 139, 60, 0.3);
+  background: rgba(201, 139, 60, 0.1);
+  color: #7a4c0f;
+}
+.note.success {
+  border-color: rgba(22, 163, 74, 0.26);
+  background: rgba(22, 163, 74, 0.08);
+  color: #14532d;
+}
+.busy-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(15, 23, 42, 0.35);
+  backdrop-filter: blur(3px);
+}
+.busy-overlay[hidden] { display: none; }
+.busy-card {
+  display: grid;
+  gap: 10px;
+  justify-items: center;
+  width: min(380px, 100%);
+  padding: 26px 24px;
+  border-radius: 20px;
+  background: #fff;
+  box-shadow: var(--shadow);
+  text-align: center;
+}
+.busy-card .button-spinner {
+  width: 30px;
+  height: 30px;
+  margin: 0;
+  border-width: 3px;
+  border-color: rgba(27, 78, 216, 0.18);
+  border-top-color: var(--primary);
+}
+.busy-title { font-weight: 800; font-size: 1.05rem; }
+.busy-elapsed { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 0.9rem; }
+.kbd-hint { color: var(--muted-2); font-size: 0.8rem; }
+kbd {
+  padding: 1px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: #f8fafc;
+  font: inherit;
+  font-size: 0.78rem;
 }
 .toast {
   position: fixed;
@@ -830,7 +1020,9 @@ tbody tr:hover td {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 7px 10px;
+  padding: 5px 10px;
+  font-size: 0.84rem;
+  white-space: nowrap;
   border-radius: 999px;
   border: 1px solid var(--line);
   background: rgba(17, 32, 57, 0.05);
@@ -953,6 +1145,8 @@ pre {
   .hero-shell, .surface, .card, .panel, .hero-aside, .table-panel, .manifest-panel { padding: 18px; }
   h1 { font-size: clamp(2.2rem, 12vw, 3.4rem); }
   .site-footer { align-items: flex-start; flex-direction: column; }
+  .filter-box input[type="search"] { max-width: none; }
+  .table-wrap { max-height: none; }
 }
 @media (max-width: 900px) {
   .hero-grid, .form-grid {
@@ -989,6 +1183,8 @@ function showCopyFeedback(el, success) {
   setTimeout(function() { el.style.borderColor = ''; }, 600);
 }
 function legacyCopy(el) {
+  var details = el.closest('details');
+  if (details) details.open = true;
   el.focus();
   el.select();
   el.setSelectionRange(0, el.value.length);
@@ -1016,8 +1212,69 @@ function scrollToResult(id) {
     el.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' });
   });
 }
+function listItems(value) {
+  return value.split(/[\\r\\n;]+/)
+    .map(function(item) { return item.replace(/^\\s*(?:[-*]|\\d+[.)])\\s*/, '').trim(); })
+    .filter(Boolean);
+}
 function countListItems(value) {
-  return value.split(/[\\r\\n;]+/).map(function(item) { return item.trim(); }).filter(Boolean).length;
+  return listItems(value).length;
+}
+function tsvToCsv(tsv) {
+  return tsv.split('\\n').map(function(line) {
+    return line.split('\\t').map(function(cell) {
+      return /[",\\r\\n]/.test(cell) ? '"' + cell.replace(/"/g, '""') + '"' : cell;
+    }).join(',');
+  }).join('\\r\\n');
+}
+function downloadTsvAsCsv(id, filename) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  var blob = new Blob(['\\ufeff' + tsvToCsv(el.value)], { type: 'text/csv;charset=utf-8' });
+  var link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  setTimeout(function() { URL.revokeObjectURL(link.href); link.remove(); }, 1000);
+  announce('CSV downloaded.');
+}
+function applyTableFilter(tableId) {
+  var table = document.getElementById(tableId);
+  if (!table) return;
+  var input = document.querySelector('[data-filter-table="' + tableId + '"]');
+  var hideFail = document.querySelector('[data-hide-fail="' + tableId + '"]');
+  var term = input ? input.value.trim().toLowerCase() : '';
+  var hide = hideFail ? hideFail.checked : false;
+  var visible = 0;
+  table.querySelectorAll('tbody tr').forEach(function(row) {
+    var show = (!term || row.textContent.toLowerCase().indexOf(term) !== -1) && !(hide && row.classList.contains('row-fail'));
+    row.hidden = !show;
+    if (show) visible++;
+  });
+  var empty = table.parentElement.querySelector('.empty-filter');
+  if (empty) empty.hidden = visible !== 0;
+}
+var busyTimer;
+function showBusy(label) {
+  var overlay = document.getElementById('busy-overlay');
+  if (!overlay) return;
+  overlay.querySelector('.busy-title').textContent = label;
+  var elapsed = overlay.querySelector('.busy-elapsed');
+  var started = Date.now();
+  var tick = function() {
+    var secs = Math.floor((Date.now() - started) / 1000);
+    elapsed.textContent = Math.floor(secs / 60) + ':' + String(secs % 60).padStart(2, '0') + ' elapsed';
+  };
+  tick();
+  clearInterval(busyTimer);
+  busyTimer = setInterval(tick, 1000);
+  overlay.hidden = false;
+}
+function hideBusy() {
+  clearInterval(busyTimer);
+  var overlay = document.getElementById('busy-overlay');
+  if (overlay) overlay.hidden = true;
 }
 function resetSubmitButton(btn) {
   if (!btn || !btn.dataset.originalHtml) return;
@@ -1029,11 +1286,25 @@ document.addEventListener('DOMContentLoaded', function() {
   document.querySelectorAll('textarea[data-list-input]').forEach(function(input) {
     var count = document.querySelector('[data-count-for="' + input.id + '"]');
     var updateCount = function() {
-      var itemCount = countListItems(input.value);
-      if (count) count.textContent = itemCount + (itemCount === 1 ? ' item' : ' items');
+      var items = listItems(input.value);
+      var unique = new Set(items.map(function(item) { return item.toLowerCase(); })).size;
+      var dupes = items.length - unique;
+      if (count) count.textContent = unique + (unique === 1 ? ' item' : ' items') + (dupes ? ' \u00b7 ' + dupes + ' duplicate' + (dupes === 1 ? '' : 's') + ' skipped' : '');
     };
     input.addEventListener('input', updateCount);
+    input.addEventListener('keydown', function(event) {
+      if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && input.form) {
+        event.preventDefault();
+        if (input.form.requestSubmit) input.form.requestSubmit(); else input.form.submit();
+      }
+    });
     updateCount();
+  });
+  document.querySelectorAll('[data-filter-table]').forEach(function(input) {
+    input.addEventListener('input', function() { applyTableFilter(input.dataset.filterTable); });
+  });
+  document.querySelectorAll('[data-hide-fail]').forEach(function(input) {
+    input.addEventListener('change', function() { applyTableFilter(input.dataset.hideFail); });
   });
   document.querySelectorAll('form').forEach(function(form) {
     form.addEventListener('submit', function() {
@@ -1043,11 +1314,13 @@ document.addEventListener('DOMContentLoaded', function() {
         btn.dataset.originalHtml = btn.innerHTML;
         btn.setAttribute('aria-busy', 'true');
         btn.innerHTML = '<span class="button-spinner" aria-hidden="true"></span>' + (btn.dataset.loadingLabel || 'Processing\u2026');
+        showBusy(btn.dataset.loadingLabel || 'Processing\u2026');
       }
     });
   });
 });
 window.addEventListener('pageshow', function() {
+  hideBusy();
   document.querySelectorAll('button[type="submit"]').forEach(resetSubmitButton);
 });
 </script>
@@ -1106,6 +1379,14 @@ def _page(title: str, body: str, active: str = "") -> HTMLResponse:
       </footer>
     </div>
     <div id="app-toast" class="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+    <div id="busy-overlay" class="busy-overlay" hidden>
+      <div class="busy-card" role="status" aria-live="polite">
+        <span class="button-spinner" aria-hidden="true"></span>
+        <div class="busy-title">Working…</div>
+        <div class="busy-elapsed">0:00 elapsed</div>
+        <p class="microcopy">Live queries to EDQM / USP can take up to a minute for large lists. Keep this tab open.</p>
+      </div>
+    </div>
   </body>
 </html>"""
     )
@@ -1163,7 +1444,7 @@ def _safe_href(url: str) -> str:
 
 
 def _parse_vercel_form(raw_body: bytes) -> dict[str, list[str]]:
-    return parse_qs(raw_body.decode("utf-8"), keep_blank_values=True)
+    return parse_qs(raw_body.decode("utf-8", errors="replace"), keep_blank_values=True)
 
 
 def _parse_lines(raw: str) -> list[str]:
@@ -1224,13 +1505,68 @@ def _edqm_lookup_enrichment(downloader, product_code: str) -> dict[str, str]:
         "unit_quantity": summary.get("unit_quantity", ""),
         "storage": summary.get("storage", ""),
         "cas": summary.get("cas", ""),
+        "country_of_origin": _edqm_country_of_origin(downloader, product_code),
+        "detail_url": getattr(downloader, "get_detail_url", lambda _code: "")(product_code),
     }
+
+
+def _edqm_country_of_origin(downloader, product_code: str) -> str:
+    getter = getattr(downloader, "get_country_of_origin", None)
+    if not callable(getter):
+        return ""
+    try:
+        return getter(product_code) or ""
+    except Exception:
+        return ""
+
+
+def _enrich_codes(source: str, codes: list[str]) -> dict[str, dict[str, str]]:
+    """Fetch detail metadata (incl. country of origin) for several codes in parallel.
+
+    Each worker owns its own downloader because downloaders keep per-product state.
+    """
+    if source == "edqm":
+        from src.downloaders.edqm import EDQMDownloader as DownloaderCls
+
+        enrich_fn = _edqm_lookup_enrichment
+    else:
+        from src.downloaders.usp import USPDownloader as DownloaderCls
+
+        enrich_fn = _usp_lookup_enrichment
+
+    unique_codes = list(dict.fromkeys(code for code in codes if code))
+    if not unique_codes:
+        return {}
+
+    def enrich(code: str) -> dict[str, str]:
+        with TemporaryDirectory() as tmpdir:
+            with DownloaderCls(download_dir=Path(tmpdir)) as downloader:
+                return enrich_fn(downloader, code)
+
+    results: dict[str, dict[str, str]] = {}
+    with ThreadPoolExecutor(max_workers=min(LOOKUP_ENRICH_WORKERS, len(unique_codes))) as executor:
+        future_map = {executor.submit(enrich, code): code for code in unique_codes}
+        for future in as_completed(future_map):
+            try:
+                results[future_map[future]] = future.result()
+            except Exception:
+                results[future_map[future]] = {}
+    return results
+
+
+def _default_detail_url(source: str, code: str) -> str:
+    if not code:
+        return ""
+    template = EDQM_DETAIL_URL_TEMPLATE if source.upper() == "EDQM" else USP_DETAIL_URL_TEMPLATE
+    return template.format(code=code)
 
 
 def _usp_lookup_enrichment(downloader, product_code: str) -> dict[str, str]:
     if not downloader.search_product(product_code):
         return {}
-    return _usp_product_summary(downloader)
+    summary = _usp_product_summary(downloader)
+    summary["detail_url"] = getattr(downloader, "get_detail_url", lambda _code: "")(product_code)
+    return summary
 
 
 def _lookup_rows_for_source(
@@ -1264,13 +1600,14 @@ def _lookup_rows_for_source(
                         }
                     ]
 
+                enrichment_by_code = (
+                    _enrich_codes("edqm", [match.product_code for match in matches])
+                    if include_lookup_enrichment
+                    else {}
+                )
                 rows: list[dict[str, str]] = []
                 for idx, match in enumerate(matches, start=1):
-                    enrichment = (
-                        _edqm_lookup_enrichment(downloader, match.product_code)
-                        if include_lookup_enrichment
-                        else {}
-                    )
+                    enrichment = enrichment_by_code.get(match.product_code, {})
                     rows.append(
                         {
                             "query": query,
@@ -1305,11 +1642,17 @@ def _lookup_rows_for_source(
                     }
                 ]
 
+            enrichment_by_code = (
+                _enrich_codes("usp", [match.product_code for match in matches])
+                if include_lookup_enrichment
+                else {}
+            )
             rows: list[dict[str, str]] = []
             for idx, match in enumerate(matches, start=1):
                 enrichment = dict(getattr(match, "metadata", {}) or {})
-                if include_lookup_enrichment:
-                    enrichment.update(_usp_lookup_enrichment(downloader, match.product_code))
+                enrichment.update(
+                    {key: value for key, value in enrichment_by_code.get(match.product_code, {}).items() if value}
+                )
                 rows.append(
                     {
                         "query": query,
@@ -1326,8 +1669,15 @@ def _lookup_rows_for_source(
             return rows
 
 
+def _ensure_product(downloader, product_code: str) -> bool:
+    ensure = getattr(downloader, "_ensure_current_product", None)
+    if callable(ensure):
+        return bool(ensure(product_code))
+    return bool(downloader.search_product(product_code))
+
+
 def _edqm_batch_summary(downloader, product_code: str) -> dict[str, str]:
-    if not downloader.search_product(product_code):
+    if not _ensure_product(downloader, product_code):
         return {}
 
     current = getattr(downloader, "_current", None)
@@ -1350,6 +1700,7 @@ def _edqm_batch_summary(downloader, product_code: str) -> dict[str, str]:
         "dispatching": fields.get("Dispatching conditions", ""),
         "unit_quantity": fields.get("Unit quantity per vial", ""),
         "sales_restriction": fields.get("Sales restriction", ""),
+        "country_of_origin": _edqm_country_of_origin(downloader, product_code),
         "cas": cas_number
         or _resolve_cas_number(
             "edqm",
@@ -1363,7 +1714,7 @@ def _edqm_batch_summary(downloader, product_code: str) -> dict[str, str]:
 
 
 def _usp_batch_summary(downloader, product_code: str) -> dict[str, str]:
-    if not downloader.search_product(product_code):
+    if not _ensure_product(downloader, product_code):
         return {}
 
     product = getattr(downloader, "_current_product", None)
@@ -1732,6 +2083,10 @@ def _download_batch(source: str, codes: list[str], doc_types: list[str]) -> dict
                         else:
                             notes.append(f"{doc}: {result.error or 'Download failed'}")
 
+                if source == "edqm":
+                    summary = dict(summary)
+                    summary["country_of_origin"] = _edqm_country_of_origin(downloader, code)
+                    row["summary"] = summary
                 timeline.append({"label": "Package", "status": "ok" if files_downloaded else "fail"})
                 row["doc_results"] = doc_results
                 row["timeline"] = timeline
@@ -1827,7 +2182,7 @@ def _lookup_catalogue_numbers(source: str, names: list[str], limit: int = 8) -> 
         return rows
 
     ordered_results: dict[tuple[int, int], list[dict[str, str]]] = {}
-    include_lookup_enrichment = len(names) <= 5
+    include_lookup_enrichment = len(names) <= LOOKUP_ENRICHMENT_MAX_NAMES
     max_workers = min(LOOKUP_MAX_WORKERS, len(tasks))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_map = {
@@ -1868,7 +2223,6 @@ def _lookup_catalogue_numbers(source: str, names: list[str], limit: int = 8) -> 
 
 
 def _lookup_current_batches(source: str, codes: list[str]) -> list[dict[str, str]]:
-    rows: list[dict[str, str]] = []
     source = source.lower()
 
     if source == "edqm":
@@ -1876,27 +2230,25 @@ def _lookup_current_batches(source: str, codes: list[str]) -> list[dict[str, str
     else:
         from src.downloaders.usp import USPDownloader as DownloaderCls
 
-    with TemporaryDirectory() as tmpdir:
-        downloader = DownloaderCls(download_dir=Path(tmpdir))
-        downloader.start()
-        try:
-            for code in codes:
+    def not_found_row(code: str, status: str = "Product not found") -> dict[str, str]:
+        return {
+            "query": code,
+            "source": source.upper(),
+            "code": code,
+            "name": "",
+            "batch_number": "",
+            "status": status,
+            "summary": {},
+            "detail_url": "",
+            "actionability": "Batch not found",
+            "actionability_class": "fail",
+        }
+
+    def lookup_code(code: str) -> dict[str, str]:
+        with TemporaryDirectory() as tmpdir:
+            with DownloaderCls(download_dir=Path(tmpdir)) as downloader:
                 if not downloader.search_product(code):
-                    rows.append(
-                        {
-                            "query": code,
-                            "source": source.upper(),
-                            "code": code,
-                            "name": "",
-                            "batch_number": "",
-                            "status": "Product not found",
-                            "summary": {},
-                            "detail_url": "",
-                            "actionability": "Batch not found",
-                            "actionability_class": "fail",
-                        }
-                    )
-                    continue
+                    return not_found_row(code)
 
                 if source == "edqm":
                     summary = _edqm_batch_summary(downloader, code)
@@ -1907,25 +2259,37 @@ def _lookup_current_batches(source: str, codes: list[str]) -> list[dict[str, str
 
                 position_name = summary.get("name") or _resolve_position_name(downloader, code)
                 actionability, actionability_class = _batch_actionability(source, summary)
+                return {
+                    "query": code,
+                    "source": source.upper(),
+                    "code": code,
+                    "name": position_name,
+                    "batch_number": batch_number,
+                    "status": "OK" if batch_number else "Batch not found",
+                    "summary": summary,
+                    "detail_url": summary.get("detail_url", ""),
+                    "actionability": actionability,
+                    "actionability_class": actionability_class,
+                }
 
-                rows.append(
-                    {
-                        "query": code,
-                        "source": source.upper(),
-                        "code": code,
-                        "name": position_name,
-                        "batch_number": batch_number,
-                        "status": "OK" if batch_number else "Batch not found",
-                        "summary": summary,
-                        "detail_url": summary.get("detail_url", ""),
-                        "actionability": actionability,
-                        "actionability_class": actionability_class,
-                    }
-                )
-        finally:
-            downloader.stop()
+    results: dict[int, dict[str, str]] = {}
+    with ThreadPoolExecutor(max_workers=min(BATCH_LOOKUP_MAX_WORKERS, max(1, len(codes)))) as executor:
+        future_map = {executor.submit(lookup_code, code): index for index, code in enumerate(codes)}
+        for future in as_completed(future_map):
+            index = future_map[future]
+            try:
+                results[index] = future.result()
+            except Exception as exc:
+                results[index] = not_found_row(codes[index], f"Lookup failed: {exc}")
 
-    return rows
+    return [results[index] for index in range(len(codes))]
+
+
+def _message_note(message: str, kind: str = "error") -> str:
+    if not message:
+        return ""
+    role = "alert" if kind == "error" else "status"
+    return f'<p class="note {kind}" role="{role}">{_safe_text(message)}</p>'
 
 
 def _download_form(
@@ -1934,12 +2298,13 @@ def _download_form(
     message: str = "",
     selected_docs: list[str] | None = None,
     results_html: str = "",
+    message_kind: str = "error",
 ) -> str:
     source = source.lower()
     doc_selection = selected_docs if selected_docs is not None else ["COA", "MSDS", "COO"]
     active_docs = {doc.upper() for doc in doc_selection}
     checked = lambda doc: "checked" if doc.upper() in active_docs else ""
-    note = f'<p class="note" role="status">{_safe_text(message)}</p>' if message else ""
+    note = _message_note(message, message_kind)
     return f"""
 <section class="surface">
   <form method="post" action="/download" class="panel section-stack">
@@ -1975,6 +2340,7 @@ def _download_form(
       </fieldset>
 
       <button type="submit" data-loading-label="Building package…">Generate ZIP</button>
+      <div class="kbd-hint"><kbd>⌘</kbd>/<kbd>Ctrl</kbd> + <kbd>Enter</kbd> in the list submits the form.</div>
       <div class="microcopy">One batch ZIP, folders by position plus CAS when available, summary table below, manifest kept as-is.</div>
   </form>
   {results_html}
@@ -2007,10 +2373,11 @@ def _render_download_summary_table(source: str, rows: list[dict[str, object]], d
             ("molecular_formula", False),
         ]
     else:
-        headers = ["Code", "Product Name", "CAS", "Current Batch", "Price", "Availability", "Storage"]
+        headers = ["Code", "Product Name", "Country of Origin", "CAS", "Current Batch", "Price", "Availability", "Storage"]
         accessors = [
             ("code", False),
             ("name", False),
+            ("country_of_origin", False),
             ("cas", False),
             ("current_batch", False),
             ("price", False),
@@ -2027,7 +2394,10 @@ def _render_download_summary_table(source: str, rows: list[dict[str, object]], d
         cells: list[str] = []
         for key, wrap in accessors:
             value = row.get(key) if key in {"code", "name"} else summary.get(key, "")
-            css = "wrap-cell" if wrap else ""
+            if key == "country_of_origin":
+                cells.append(f"<td>{_country_cell(str(value or ''))}</td>")
+                continue
+            css = "wrap-cell" if wrap else ("table-code" if key == "code" else "")
             cells.append(f'<td class="{css}">{_safe_text(str(value or "—"))}</td>')
         for doc in doc_types:
             doc_info = doc_results.get(doc, {}) if isinstance(doc_results.get(doc, {}), dict) else {}
@@ -2054,17 +2424,33 @@ def _render_download_results(
     manifest_text: str,
     download_token: str = "",
     position_count: int = 0,
+    zip_bytes: bytes = b"",
+    zip_filename: str = "",
 ) -> str:
     download_url = f"/download-file?token={_safe_text(download_token)}" if download_token else ""
     position_label = "position" if position_count == 1 else "positions"
     if position_count and download_url:
+        # Serverless instances do not share memory, so the token URL can miss on a
+        # different instance. Small ZIPs are embedded and served from a Blob instead.
+        inline_zip = ""
+        if zip_bytes and len(zip_bytes) <= INLINE_ZIP_MAX_BYTES:
+            inline_zip = (
+                '<script type="application/octet-stream" id="batch-zip-data">'
+                + base64.b64encode(zip_bytes).decode("ascii")
+                + "</script>"
+            )
         action_html = (
-            f'<a id="batch-download-link" class="button" href="{download_url}" download>Download Batch ZIP</a>'
+            f'<a id="batch-download-link" class="button" href="{download_url}" '
+            f'download="{_safe_text(zip_filename)}">Download Batch ZIP</a>'
         )
-        auto_download_script = (
-            '<script>window.addEventListener("load",function(){window.setTimeout(function(){'
-            'var link=document.getElementById("batch-download-link");if(link){link.click();}'
-            '},250);});</script>'
+        auto_download_script = inline_zip + (
+            '<script>window.addEventListener("load",function(){'
+            'var link=document.getElementById("batch-download-link");if(!link)return;'
+            'var data=document.getElementById("batch-zip-data");'
+            'if(data){try{var raw=atob(data.textContent.trim());var bytes=new Uint8Array(raw.length);'
+            'for(var i=0;i<raw.length;i++){bytes[i]=raw.charCodeAt(i);}'
+            'link.href=URL.createObjectURL(new Blob([bytes],{type:"application/zip"}));}catch(e){}}'
+            'window.setTimeout(function(){link.click();},250);});</script>'
         )
     else:
         action_html = '<span class="button secondary" aria-disabled="true">No ZIP Available</span>'
@@ -2086,7 +2472,7 @@ def _render_download_results(
 
 
 def _lookup_form(source: str = "both", names: str = "", table_html: str = "", message: str = "") -> str:
-    note = f'<p class="note" role="status">{_safe_text(message)}</p>' if message else ""
+    note = _message_note(message)
     return f"""
 <section class="surface">
     <form method="post" action="/lookup" class="panel section-stack">
@@ -2113,6 +2499,7 @@ def _lookup_form(source: str = "both", names: str = "", table_html: str = "", me
       </div>
 
       <button type="submit" class="secondary" data-loading-label="Searching catalogues…">Run Lookup</button>
+      <div class="kbd-hint"><kbd>⌘</kbd>/<kbd>Ctrl</kbd> + <kbd>Enter</kbd> in the list submits the form. Country of origin, batch and price are fetched for up to 10 names per run.</div>
     </form>
   {table_html}
 </section>
@@ -2121,7 +2508,7 @@ def _lookup_form(source: str = "both", names: str = "", table_html: str = "", me
 
 def _batch_lookup_form(source: str = "edqm", codes: str = "", table_html: str = "", message: str = "") -> str:
     source = source.lower().strip()
-    note = f'<p class="note" role="status">{_safe_text(message)}</p>' if message else ""
+    note = _message_note(message)
     return f"""
 <section class="surface">
     <form method="post" action="/batches" class="panel section-stack">
@@ -2147,96 +2534,129 @@ def _batch_lookup_form(source: str = "edqm", codes: str = "", table_html: str = 
       </div>
 
       <button type="submit" class="secondary" data-loading-label="Checking current batches…">Run Batch Lookup</button>
+      <div class="kbd-hint"><kbd>⌘</kbd>/<kbd>Ctrl</kbd> + <kbd>Enter</kbd> in the list submits the form.</div>
     </form>
   {table_html}
 </section>
 """
 
 
-def _lookup_results_table(rows: list[dict[str, str]]) -> str:
+def _enrichment_of(row: dict) -> dict:
+    enrichment = row.get("enrichment", {})
+    return enrichment if isinstance(enrichment, dict) else {}
+
+
+def _country_cell(country: str) -> str:
+    if not country:
+        return '<span class="muted">—</span>'
+    return f'<span class="country-chip">{_safe_text(country)}</span>'
+
+
+def _match_badge_class(match_type: str) -> str:
+    lowered = (match_type or "").lower()
+    if lowered in {"exact", "normalized"}:
+        return "ok"
+    if lowered in {"no match", "error"}:
+        return "fail"
+    return "warn"
+
+
+def _results_toolbar(table_id: str, raw_boxes: list[tuple[str, str, str, str]], csv_source_id: str, csv_name: str) -> str:
+    """Filter box, copy buttons, CSV export and a collapsible panel with the raw copy text.
+
+    ``raw_boxes`` holds (textarea id, button label, aria label, text) tuples.
+    """
+    buttons = "".join(
+        f'<button type="button" class="button {"" if idx == 0 else "ghost"} small" '
+        f"onclick=\"copyFromTextarea('{box_id}')\">{_safe_text(label)}</button>"
+        for idx, (box_id, label, _aria, _text) in enumerate(raw_boxes)
+    )
+    textareas = "".join(
+        f'<label class="raw-label" for="{box_id}">{_safe_text(aria)}</label>'
+        f'<textarea id="{box_id}" class="copy-box compact" readonly>{_safe_text(text)}</textarea>'
+        for box_id, _label, aria, text in raw_boxes
+    )
+    return (
+        '<div class="results-toolbar">'
+        '<div class="filter-box">'
+        f'<label class="sr-only" for="{table_id}-filter">Filter results</label>'
+        f'<input type="search" id="{table_id}-filter" placeholder="Filter rows… (name, code, country)" '
+        f'data-filter-table="{table_id}" autocomplete="off">'
+        f'<label class="toggle"><input type="checkbox" data-hide-fail="{table_id}"> Hide rows without a result</label>'
+        '</div>'
+        f'<div class="copy-actions">{buttons}'
+        f'<button type="button" class="button ghost small" onclick="downloadTsvAsCsv(\'{csv_source_id}\', \'{csv_name}\')">Download CSV</button>'
+        '</div>'
+        '</div>'
+        f'<details class="raw-export"><summary>Show copy-ready text</summary><div class="copy-tools">{textareas}</div></details>'
+    )
+
+
+def _lookup_results_table(rows: list[dict[str, str]], enrichment_skipped: bool = False) -> str:
     success_count = sum(1 for row in rows if row["code"])
-    failed_count = len(rows) - success_count
+    query_count = len({(row["source"], row["query"]) for row in rows})
+    unresolved_queries = len(
+        {(row["source"], row["query"]) for row in rows}
+        - {(row["source"], row["query"]) for row in rows if row["code"]}
+    )
     catalogue_numbers = [row["code"] for row in rows if row["code"]]
     unique_codes = list(dict.fromkeys(catalogue_numbers))
-    code_column = "\n".join(catalogue_numbers)
-    unique_code_column = "\n".join(unique_codes)
     tsv_rows = [
-        "Query\tMatched On\tMatch Type\tSource\tCatalogue Number\tProduct Name\tCAS\tCurrent Batch/Lot\tPrice\tAvailability/In Stock\tPack/Qty"
+        "Query\tMatched On\tMatch Type\tSource\tCatalogue Number\tProduct Name\tCountry of Origin\tCAS"
+        "\tCurrent Batch/Lot\tPrice\tAvailability/In Stock\tPack/Qty\tDetail URL"
     ]
 
     def cas_value_for_row(row: dict[str, str]) -> str:
-        enrichment = row.get("enrichment", {})
-        if not isinstance(enrichment, dict):
-            enrichment = {}
-        return str(row.get("cas", "") or enrichment.get("cas", "") or "")
+        return str(row.get("cas", "") or _enrichment_of(row).get("cas", "") or "")
 
     def current_value_for_row(row: dict[str, str]) -> str:
-        enrichment = row.get("enrichment", {})
-        if not isinstance(enrichment, dict):
-            enrichment = {}
-        if row["source"] == "USP":
-            return str(enrichment.get("current_lot", "") or "")
-        return str(enrichment.get("current_batch", "") or "")
+        key = "current_lot" if row["source"] == "USP" else "current_batch"
+        return str(_enrichment_of(row).get(key, "") or "")
 
     def price_value_for_row(row: dict[str, str]) -> str:
-        enrichment = row.get("enrichment", {})
-        if not isinstance(enrichment, dict):
-            enrichment = {}
-        return str(enrichment.get("price", "") or "")
+        return str(_enrichment_of(row).get("price", "") or "")
 
     def status_value_for_row(row: dict[str, str]) -> str:
-        enrichment = row.get("enrichment", {})
-        if not isinstance(enrichment, dict):
-            enrichment = {}
-        if row["source"] == "USP":
-            return str(enrichment.get("in_stock", "") or enrichment.get("country_of_origin", "") or "")
-        return str(enrichment.get("availability", "") or "")
+        key = "in_stock" if row["source"] == "USP" else "availability"
+        return str(_enrichment_of(row).get(key, "") or "")
+
+    def country_value_for_row(row: dict[str, str]) -> str:
+        return str(_enrichment_of(row).get("country_of_origin", "") or "")
 
     def pack_value_for_row(row: dict[str, str]) -> str:
-        enrichment = row.get("enrichment", {})
-        if not isinstance(enrichment, dict):
-            enrichment = {}
+        enrichment = _enrichment_of(row)
         if row["source"] == "USP":
             packing_size = str(enrichment.get("packing_size", "") or "")
             uom = str(enrichment.get("uom", "") or "")
             return " ".join(part for part in [packing_size, uom] if part).strip()
         return str(enrichment.get("unit_quantity", "") or "")
 
-    def render_lookup_details(row: dict[str, str]) -> str:
-        enrichment = row.get("enrichment", {})
-        if not isinstance(enrichment, dict):
-            enrichment = {}
+    def detail_url_for_row(row: dict[str, str]) -> str:
+        return str(_enrichment_of(row).get("detail_url", "") or _default_detail_url(row["source"], row["code"]))
 
+    def render_lookup_details(row: dict[str, str]) -> str:
+        enrichment = _enrichment_of(row)
         if row["source"] == "USP":
             fields = [
-                ("List Price", enrichment.get("price", "")),
                 ("Current Lot", enrichment.get("current_lot", "")),
-                ("Country of Origin", enrichment.get("country_of_origin", "")),
                 ("Lot History", enrichment.get("lot_history", "")),
                 ("Material Origin", enrichment.get("material_origin", "")),
-                ("In Stock", enrichment.get("in_stock", "")),
                 ("Ready to Ship", enrichment.get("ready_to_ship", "")),
                 ("Orderable", enrichment.get("orderable", "")),
-                ("Pack Size", enrichment.get("packing_size", "")),
-                ("UOM", enrichment.get("uom", "")),
-                ("CAS", enrichment.get("cas", "")),
                 ("Molecular Formula", enrichment.get("molecular_formula", "")),
                 ("Category", enrichment.get("category_type", "")),
                 ("SDS Availability", enrichment.get("sds_availability", "")),
             ]
         else:
             fields = [
-                ("Availability", enrichment.get("availability", "")),
-                ("Price", enrichment.get("price", "")),
-                ("Current Batch", enrichment.get("current_batch", "")),
-                ("Unit Quantity", enrichment.get("unit_quantity", "")),
                 ("Storage", enrichment.get("storage", "")),
-                ("CAS", enrichment.get("cas", "")),
             ]
 
         visible = [(label, value) for label, value in fields if value]
         if not visible:
-            return "—"
+            if row["code"] and not enrichment and not enrichment_skipped:
+                return '<span class="muted" title="The source website did not respond in time. Run the lookup again.">Unavailable</span>'
+            return '<span class="muted">—</span>'
 
         body = "".join(
             f'<div class="lookup-detail-item"><b>{_safe_text(label)}</b><span>{_safe_text(str(value))}</span></div>'
@@ -2249,75 +2669,122 @@ def _lookup_results_table(rows: list[dict[str, str]]) -> str:
             '</details>'
         )
 
-    for row in rows:
-        tsv_rows.append(
-            "\t".join(
-                [
-                    row["query"],
-                    row.get("matched_on", ""),
-                    row.get("match_type", ""),
-                    row["source"],
-                    row["code"],
-                    row["name"],
-                    cas_value_for_row(row),
-                    current_value_for_row(row),
-                    price_value_for_row(row),
-                    status_value_for_row(row),
-                    pack_value_for_row(row),
-                ]
-            )
-        )
-    tsv_text = "\n".join(tsv_rows)
     body = []
+    previous_group: tuple[str, str] | None = None
     for row in rows:
-        status = row["code"] if row["code"] else "No match"
-        klass = "status-ok" if row["code"] else "status-fail"
         cas_value = cas_value_for_row(row)
         current_value = current_value_for_row(row)
         price_value = price_value_for_row(row)
         status_value = status_value_for_row(row)
         pack_value = pack_value_for_row(row)
+        country_value = country_value_for_row(row)
+        detail_url = detail_url_for_row(row) if row["code"] else ""
+        match_type = row.get("match_type", "")
+        matched_on = row.get("matched_on", "")
+
+        tsv_rows.append(
+            "\t".join(
+                [
+                    row["query"],
+                    matched_on,
+                    match_type,
+                    row["source"],
+                    row["code"],
+                    row["name"],
+                    country_value,
+                    cas_value,
+                    current_value,
+                    price_value,
+                    status_value,
+                    pack_value,
+                    detail_url,
+                ]
+            )
+        )
+
+        group = (row["source"], row["query"])
+        group_class = "group-start" if group != previous_group else "group-cont"
+        previous_group = group
+        row_classes = [group_class] + ([] if row["code"] else ["row-fail"])
+
+        safe_url = _safe_href(detail_url)
+        if row["code"] and safe_url:
+            code_html = (
+                f'<a class="table-link table-code" href="{safe_url}" target="_blank" rel="noreferrer" '
+                f'title="Open on the {_safe_text(row["source"])} website">{_safe_text(row["code"])}</a>'
+            )
+        elif row["code"]:
+            code_html = f'<span class="table-code">{_safe_text(row["code"])}</span>'
+        else:
+            code_html = '<span class="status-fail">No match</span>'
+
+        if country_value:
+            country_html = f'<span class="country-chip">{_safe_text(country_value)}</span>'
+        elif row["code"] and enrichment_skipped:
+            country_html = '<span class="muted" title="Details are only fetched for up to ' + str(LOOKUP_ENRICHMENT_MAX_NAMES) + ' names per run">not fetched</span>'
+        else:
+            country_html = '<span class="muted">—</span>'
+
+        matched_hint = (
+            f'<div class="cell-sub" title="Search term used">on “{_safe_text(matched_on)}”</div>'
+            if matched_on and _compact_lookup_value(matched_on) != _compact_lookup_value(row["query"])
+            else ""
+        )
         body.append(
-            "<tr>"
-            f"<td>{_safe_text(row['query'])}</td>"
-            f"<td>{_safe_text(row.get('matched_on', ''))}</td>"
-            f"<td>{_safe_text(row.get('match_type', ''))}</td>"
-            f"<td>{_safe_text(row['source'])}</td>"
-            f'<td class="{klass} table-code">{_safe_text(status)}</td>'
-            f"<td>{_safe_text(row['name'])}</td>"
-            f'<td class="table-code">{_safe_text(cas_value or "—")}</td>'
-            f"<td>{_safe_text(current_value or '—')}</td>"
-            f"<td>{_safe_text(price_value or '—')}</td>"
+            f'<tr class="{" ".join(row_classes)}">'
+            f'<td class="query-cell">{_safe_text(row["query"])}</td>'
+            f'<td><span class="source-tag {row["source"].lower()}">{_safe_text(row["source"])}</span></td>'
+            f"<td>{code_html}</td>"
+            f'<td class="name-cell">{_safe_text(row["name"])}</td>'
+            f"<td>{country_html}</td>"
+            f'<td class="table-code nowrap">{_safe_text(cas_value or "—")}</td>'
+            f'<td class="table-code">{_safe_text(current_value or "—")}</td>'
+            f'<td class="nowrap">{_safe_text(price_value or "—")}</td>'
             f"<td>{_safe_text(status_value or '—')}</td>"
-            f"<td>{_safe_text(pack_value or '—')}</td>"
+            f'<td class="nowrap">{_safe_text(pack_value or "—")}</td>'
+            f'<td><span class="action-pill {_match_badge_class(match_type)}">{_safe_text(match_type or "—")}</span>{matched_hint}</td>'
             f"<td>{render_lookup_details(row)}</td>"
             "</tr>"
         )
+
+    tsv_text = "\n".join(tsv_rows)
+    toolbar = _results_toolbar(
+        "lookup-table",
+        [
+            ("catalogue-copy-box", "Copy Catalogue Numbers", "Catalogue numbers (one per row)", "\n".join(catalogue_numbers)),
+            ("catalogue-copy-unique", "Copy Unique Codes", "Unique catalogue numbers", "\n".join(unique_codes)),
+            ("catalogue-copy-tsv", "Copy Table TSV", "Full table as tab-separated values", tsv_text),
+        ],
+        "catalogue-copy-tsv",
+        "catalogue_lookup.csv",
+    )
+    skipped_note = (
+        f'<p class="note warn">More than {LOOKUP_ENRICHMENT_MAX_NAMES} names were submitted, so country of origin, '
+        "batch, price and availability were not fetched. Run smaller groups to see them.</p>"
+        if enrichment_skipped
+        else ""
+    )
     return (
         '<div id="lookup-results-anchor"></div>'
         '<script>scrollToResult("lookup-results-anchor");</script>'
         '<section class="table-panel">'
         '<div class="table-header">'
-        '<div><h3>Lookup Results</h3><p class="muted">Choose the right position faster with matched-on context and lightweight source metadata.</p></div>'
-        f'<div style="display:flex; gap:10px; flex-wrap:wrap;"><span class="status-pill">{success_count} matches</span>'
-        f'<span class="status-pill {"fail" if failed_count else ""}">{failed_count} no-match rows</span></div>'
+        '<div><h3>Lookup Results</h3><p class="muted">Rows are grouped by your input. Click a catalogue number to open it on the source website.</p></div>'
+        '<div class="pill-row">'
+        f'<span class="status-pill">{query_count} {"query" if query_count == 1 else "queries"}</span>'
+        f'<span class="status-pill">{success_count} {"match" if success_count == 1 else "matches"}</span>'
+        f'<span class="status-pill {"fail" if unresolved_queries else ""}">{unresolved_queries} unresolved</span>'
         "</div>"
-        '<div class="copy-tools">'
-        f'<div class="copy-meta">{len(unique_codes)} unique catalogue numbers</div>'
-        '<div class="copy-actions">'
-        '<button type="button" class="button" onclick="copyFromTextarea(\'catalogue-copy-box\')">Copy Catalogue Numbers</button>'
-        '<button type="button" class="button secondary" onclick="copyFromTextarea(\'catalogue-copy-unique\')">Copy Unique Codes</button>'
-        '<button type="button" class="button secondary" onclick="copyFromTextarea(\'catalogue-copy-tsv\')">Copy Table TSV</button>'
-        '</div>'
-        f'<textarea id="catalogue-copy-box" class="copy-box compact" aria-label="Catalogue numbers" readonly>{_safe_text(code_column)}</textarea>'
-        f'<textarea id="catalogue-copy-unique" class="copy-box compact" aria-label="Unique catalogue numbers" readonly>{_safe_text(unique_code_column)}</textarea>'
-        f'<textarea id="catalogue-copy-tsv" class="copy-box" aria-label="Catalogue lookup table as tab-separated values" readonly style="min-height: 180px;">{_safe_text(tsv_text)}</textarea>'
-        '</div>'
-        '<div class="table-wrap" role="region" aria-label="Catalogue lookup results" tabindex="0"><table><caption class="sr-only">Catalogue lookup matches</caption><thead><tr>'
-        "<th>Original Input</th><th>Matched On</th><th>Match Type</th><th>Source</th><th>Catalogue Number</th><th>Product Name</th><th>CAS</th><th>Current Batch / Lot</th><th>Price</th><th>Availability / In Stock</th><th>Pack / Qty</th><th>Details</th>"
+        "</div>"
+        + skipped_note
+        + toolbar
+        + '<div class="table-wrap" role="region" aria-label="Catalogue lookup results" tabindex="0">'
+        '<table id="lookup-table"><caption class="sr-only">Catalogue lookup matches</caption><thead><tr>'
+        "<th>Input</th><th>Source</th><th>Catalogue No.</th><th>Product Name</th><th>Country of Origin</th><th>CAS</th>"
+        "<th>Batch / Lot</th><th>Price</th><th>Availability</th><th>Pack / Qty</th><th>Match</th><th>Details</th>"
         "</tr></thead><tbody>"
         + "".join(body)
-        + "</tbody></table></div></section>"
+        + '</tbody></table><p class="empty-filter" hidden>No rows match the filter.</p></div></section>'
     )
 
 
@@ -2336,9 +2803,9 @@ def _batch_results_table(rows: list[dict[str, str]]) -> str:
             "<th>COO</th><th>Material Origin</th><th>Certificate Valid</th><th>Actionability</th><th>Detail</th>"
         )
     else:
-        tsv_rows = ["Input\tSource\tCode\tName\tCAS\tCurrent Batch\tAvailability\tPrice\tStorage\tDispatching\tActionability\tDetail URL"]
+        tsv_rows = ["Input\tSource\tCode\tName\tCAS\tCurrent Batch\tCOO\tAvailability\tPrice\tStorage\tDispatching\tActionability\tDetail URL"]
         header_html = (
-            "<th>Input</th><th>Source</th><th>Code</th><th>Name</th><th>CAS</th><th>Current Batch</th><th>Availability</th>"
+            "<th>Input</th><th>Source</th><th>Code</th><th>Name</th><th>CAS</th><th>Current Batch</th><th>COO</th><th>Availability</th>"
             "<th>Price</th><th>Storage</th><th>Dispatching</th><th>Actionability</th><th>Detail</th>"
         )
     body = []
@@ -2377,7 +2844,7 @@ def _batch_results_table(rows: list[dict[str, str]]) -> str:
                 )
             )
             body.append(
-                "<tr>"
+                f'<tr class="{"" if row["batch_number"] else "row-fail"}">'
                 f"<td>{_safe_text(row['query'])}</td>"
                 f"<td>{_safe_text(row['source'])}</td>"
                 f'<td class="table-code">{_safe_text(row["code"])}</td>'
@@ -2385,7 +2852,7 @@ def _batch_results_table(rows: list[dict[str, str]]) -> str:
                 f'<td class="table-code">{_safe_text(cas_number or "—")}</td>'
                 f'<td class="table-code">{_safe_text(current_lot)}</td>'
                 f"<td>{_safe_text(valid_use_date or '—')}</td>"
-                f"<td>{_safe_text(coo or '—')}</td>"
+                f"<td>{_country_cell(coo)}</td>"
                 f"<td>{_safe_text(material_origin or '—')}</td>"
                 f"<td>{_safe_text(certificate_valid or '—')}</td>"
                 f'<td><span class="action-pill {action_class}">{_safe_text(actionability)}</span></td>'
@@ -2399,6 +2866,7 @@ def _batch_results_table(rows: list[dict[str, str]]) -> str:
             storage = summary.get("storage", "")
             dispatching = summary.get("dispatching", "")
             cas_number = summary.get("cas", "")
+            coo = summary.get("country_of_origin", "")
             tsv_rows.append(
                 "\t".join(
                     [
@@ -2408,6 +2876,7 @@ def _batch_results_table(rows: list[dict[str, str]]) -> str:
                         row["name"],
                         cas_number,
                         current_batch,
+                        coo,
                         availability,
                         price,
                         storage,
@@ -2418,13 +2887,14 @@ def _batch_results_table(rows: list[dict[str, str]]) -> str:
                 )
             )
             body.append(
-                "<tr>"
+                f'<tr class="{"" if row["batch_number"] else "row-fail"}">'
                 f"<td>{_safe_text(row['query'])}</td>"
                 f"<td>{_safe_text(row['source'])}</td>"
                 f'<td class="table-code">{_safe_text(row["code"])}</td>'
                 f"<td>{_safe_text(row['name'])}</td>"
                 f'<td class="table-code">{_safe_text(cas_number or "—")}</td>'
                 f'<td class="table-code">{_safe_text(current_batch)}</td>'
+                f"<td>{_country_cell(coo)}</td>"
                 f"<td>{_safe_text(availability or '—')}</td>"
                 f"<td>{_safe_text(price or '—')}</td>"
                 f"<td>{_safe_text(storage or '—')}</td>"
@@ -2441,25 +2911,24 @@ def _batch_results_table(rows: list[dict[str, str]]) -> str:
         '<section class="table-panel">'
         '<div class="table-header">'
         '<div><h3>Current Batch Results</h3><p class="muted">Batch view enriched with source metadata, actionability, and direct detail links.</p></div>'
-        f'<div style="display:flex; gap:10px; flex-wrap:wrap;"><span class="status-pill">{found_count} batches found</span>'
+        f'<div class="pill-row"><span class="status-pill">{found_count} batches found</span>'
         f'<span class="status-pill {"fail" if missing_count else ""}">{missing_count} missing</span></div>'
         "</div>"
-        '<div class="copy-tools">'
-        f'<div class="copy-meta">{len(unique_batches)} unique current batch numbers</div>'
-        '<div class="copy-actions">'
-        '<button type="button" class="button" onclick="copyFromTextarea(\'batch-copy-box\')">Copy Batch Numbers</button>'
-        '<button type="button" class="button secondary" onclick="copyFromTextarea(\'batch-copy-unique\')">Copy Unique Batch Numbers</button>'
-        '<button type="button" class="button secondary" onclick="copyFromTextarea(\'batch-copy-tsv\')">Copy Table TSV</button>'
-        '</div>'
-        f'<textarea id="batch-copy-box" class="copy-box compact" aria-label="Current batch numbers" readonly>{_safe_text(batch_column)}</textarea>'
-        f'<textarea id="batch-copy-unique" class="copy-box compact" aria-label="Unique current batch numbers" readonly>{_safe_text(unique_batch_column)}</textarea>'
-        f'<textarea id="batch-copy-tsv" class="copy-box" aria-label="Current batch table as tab-separated values" readonly style="min-height: 180px;">{_safe_text(tsv_text)}</textarea>'
-        '</div>'
-        '<div class="table-wrap" role="region" aria-label="Current batch results" tabindex="0"><table><caption class="sr-only">Current batch results by catalogue number</caption><thead><tr>'
+        + _results_toolbar(
+            "batch-table",
+            [
+                ("batch-copy-box", "Copy Batch Numbers", "Current batch numbers", batch_column),
+                ("batch-copy-unique", "Copy Unique Batch Numbers", "Unique current batch numbers", unique_batch_column),
+                ("batch-copy-tsv", "Copy Table TSV", "Full table as tab-separated values", tsv_text),
+            ],
+            "batch-copy-tsv",
+            "current_batches.csv",
+        )
+        + '<div class="table-wrap" role="region" aria-label="Current batch results" tabindex="0"><table id="batch-table"><caption class="sr-only">Current batch results by catalogue number</caption><thead><tr>'
         + header_html
         + "</tr></thead><tbody>"
         + "".join(body)
-        + "</tbody></table></div></section>"
+        + '</tbody></table><p class="empty-filter" hidden>No rows match the filter.</p></div></section>'
     )
 
 
@@ -2644,10 +3113,16 @@ def download_documents(
     rows = list(batch_result.get("rows", []))
     zip_bytes = bytes(batch_result.get("zip_bytes", b""))
     download_token = ""
+    zip_filename = ""
     if zip_bytes:
-        filename = f"{source.upper()}_BATCH_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{position_count}pos.zip"
-        download_token = _store_download_payload(filename, zip_bytes)
-    message = "Download complete. Your ZIP is downloading automatically." if position_count else "No files were downloaded. Review the summary and manifest below."
+        zip_filename = f"{source.upper()}_BATCH_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{position_count}pos.zip"
+        download_token = _store_download_payload(zip_filename, zip_bytes)
+    if position_count:
+        message = "Download complete. Your ZIP is downloading automatically."
+        message_kind = "success"
+    else:
+        message = "No files were downloaded. Review the summary and manifest below."
+        message_kind = "warn"
 
     results_html = _render_download_results(
         source=source,
@@ -2657,6 +3132,8 @@ def download_documents(
         manifest_text=manifest_text,
         download_token=download_token,
         position_count=position_count,
+        zip_bytes=zip_bytes,
+        zip_filename=zip_filename,
     )
     return _page(
         "Download Documents",
@@ -2666,6 +3143,7 @@ def download_documents(
             message=message,
             selected_docs=clean_doc_types,
             results_html=results_html,
+            message_kind=message_kind,
         ),
         active="download",
     )
@@ -2715,7 +3193,7 @@ def lookup_catalogue_numbers(
             active="lookup",
         )
 
-    table_html = _lookup_results_table(rows)
+    table_html = _lookup_results_table(rows, enrichment_skipped=len(clean_names) > LOOKUP_ENRICHMENT_MAX_NAMES)
     return _page(
         "Find Catalogue Numbers",
         _lookup_form(source=source, names=names, table_html=table_html),

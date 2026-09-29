@@ -27,7 +27,9 @@ class ApiRouteTests(unittest.TestCase):
                     "price": "90 EUR",
                     "current_batch": "2",
                     "unit_quantity": "10 MG",
+                    "storage": "+5°C+/-3°C",
                     "cas": "871037-78-0",
+                    "country_of_origin": "France",
                 },
             }
         ]
@@ -46,6 +48,39 @@ class ApiRouteTests(unittest.TestCase):
         self.assertIn("CAS", resp.text)
         self.assertIn("871037-78-0", resp.text)
         self.assertIn("View details", resp.text)
+        self.assertIn("Country of Origin", resp.text)
+        self.assertIn('<span class="country-chip">France</span>', resp.text)
+        self.assertIn("https://crs.edqm.eu/db/4DCGI/View=Y0001949", resp.text)
+        self.assertIn("Download CSV", resp.text)
+
+    def test_lookup_notes_when_enrichment_skipped(self):
+        from api.index import LOOKUP_ENRICHMENT_MAX_NAMES
+
+        names = [f"Product {idx}" for idx in range(LOOKUP_ENRICHMENT_MAX_NAMES + 1)]
+        fake_rows = [
+            {
+                "query": name,
+                "matched_on": name,
+                "match_type": "Exact",
+                "rank": "1",
+                "source": "EDQM",
+                "code": f"Y{idx:07d}",
+                "name": name.upper(),
+                "cas": "",
+                "enrichment": {},
+            }
+            for idx, name in enumerate(names)
+        ]
+
+        with patch("api.index._lookup_catalogue_numbers", return_value=fake_rows):
+            resp = self.client.post(
+                "/api/index.py?page=lookup",
+                data={"source": "edqm", "names": "\n".join(names)},
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("were not fetched", resp.text)
+        self.assertIn("not fetched", resp.text)
 
     def test_download_post_renders_summary_page(self):
         fake_result = {
@@ -59,6 +94,7 @@ class ApiRouteTests(unittest.TestCase):
                     "name": "GLYCEROL MONOSTEARATE 40-55 CRS",
                     "summary": {
                         "name": "GLYCEROL MONOSTEARATE 40-55 CRS",
+                        "country_of_origin": "France",
                         "cas": "31566-31-1",
                         "current_batch": "4",
                         "price": "90 EUR",
@@ -87,6 +123,9 @@ class ApiRouteTests(unittest.TestCase):
         self.assertIn("G0400006", resp.text)
         self.assertIn("31566-31-1", resp.text)
         self.assertIn("download-file?token=", resp.text)
+        self.assertIn("Country of Origin", resp.text)
+        self.assertIn('<span class="country-chip">France</span>', resp.text)
+        self.assertIn('id="batch-zip-data"', resp.text)
 
     def test_download_file_route_returns_zip(self):
         from api.index import _store_download_payload
@@ -120,6 +159,7 @@ class ApiRouteTests(unittest.TestCase):
                     "price": "90 EUR",
                     "storage": "+5°C+/-3°C",
                     "dispatching": "Ambient temp.",
+                    "country_of_origin": "Great Britain",
                 },
                 "detail_url": "https://crs.edqm.eu/db/4DCGI/View=I0020000",
                 "actionability": "Current",
@@ -141,6 +181,8 @@ class ApiRouteTests(unittest.TestCase):
         self.assertIn("Availability", resp.text)
         self.assertIn("15687-27-1", resp.text)
         self.assertIn("Open", resp.text)
+        self.assertIn("<th>COO</th>", resp.text)
+        self.assertIn('<span class="country-chip">Great Britain</span>', resp.text)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,9 @@
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
-from src.downloaders.edqm import EDQMDownloader
+from src.downloaders.edqm import EDQMDownloader, ProductContext
 
 
 class EDQMDownloaderTests(unittest.TestCase):
@@ -43,6 +46,38 @@ class EDQMDownloaderTests(unittest.TestCase):
         )
 
         self.assertEqual(message, "Sigma SDS fallback failed: Sigma host could not be resolved from the runtime")
+
+    def test_get_country_of_origin_parses_coo_once_and_cleans_up(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            downloader = EDQMDownloader(download_dir=Path(tmpdir))
+            downloader._current = ProductContext(
+                code="G0400006",
+                links={"COO": "https://crs.edqm.eu/db/4DCGI/OofGoods?OofGoods=G0400006_CO_2.pdf"},
+            )
+            calls = []
+
+            def fake_download(url, destination_dir=None):
+                calls.append(url)
+                path = destination_dir / "G0400006_CO_2.txt"
+                path.write_text(
+                    "Code catalogue Batch number Material origin Country of non-preferential origin for components\n"
+                    "G0400006 2 Vegetal/plant France\n"
+                    "*Information applies to batch number and sub-batches.\n"
+                )
+                return path
+
+            with patch.object(downloader, "_download_binary", side_effect=fake_download):
+                self.assertEqual(downloader.get_country_of_origin("G0400006"), "France")
+                self.assertEqual(downloader.get_country_of_origin("G0400006"), "France")
+
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(list((Path(tmpdir) / "edqm").glob("*")), [])
+
+    def test_get_country_of_origin_without_coo_link(self):
+        downloader = EDQMDownloader()
+        downloader._current = ProductContext(code="Y0000001", links={})
+
+        self.assertEqual(downloader.get_country_of_origin("Y0000001"), "")
 
 
 if __name__ == "__main__":

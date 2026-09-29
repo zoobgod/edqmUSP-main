@@ -60,8 +60,12 @@ This app does it in one run:
 - Landing page on the root domain.
 - Dedicated downloader page on the same domain.
 - Dedicated bulk catalogue-finder page on the same domain.
-- Copy-ready lookup output for catalogue numbers and full table data.
-- Responsive, keyboard-accessible workflows with input counts, loading feedback, and accessible result tables.
+- Catalogue finder shows **Country of Origin** for EDQM (parsed from the "Origin of Goods" PDF) and USP positions, alongside batch, price, and availability (fetched for up to 10 names per run).
+- Current batch and download summaries also show the EDQM country of origin.
+- Copy-ready lookup output for catalogue numbers and full table data, plus one-click CSV export.
+- Result tables with sticky headers, row filtering, "hide rows without a result", grouped matches per input, and links to the source product page.
+- Responsive, keyboard-accessible workflows with input/duplicate counts, Cmd/Ctrl+Enter submit, a progress overlay with elapsed time, and accessible result tables.
+- Small batch ZIPs are embedded in the result page so downloads keep working when serverless instances do not share memory.
 - Built on FastAPI for Vercel deployment, while reusing the same EDQM/USP downloader logic.
 
 ## Requirements

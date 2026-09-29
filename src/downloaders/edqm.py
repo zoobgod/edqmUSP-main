@@ -9,6 +9,7 @@ from __future__ import annotations
 import html
 import logging
 import re
+import shutil
 import socket
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
@@ -69,6 +70,7 @@ class ProductContext:
     detail_url: str = ""
     detail_html: str = ""
     links: dict[str, str] = field(default_factory=dict)
+    country_of_origin: str | None = None
 
 
 @dataclass
@@ -91,9 +93,9 @@ class EDQMDownloader:
         (self.download_dir / "edqm").mkdir(parents=True, exist_ok=True)
         session = requests.Session()
         retry = Retry(
-            total=1,
+            total=2,
             connect=1,
-            read=0,
+            read=1,  # crs.edqm.eu occasionally stalls a single request; GETs are safe to retry.
             status=1,
             backoff_factor=0.5,
             status_forcelist=[429, 500, 502, 503, 504],
@@ -206,7 +208,9 @@ class EDQMDownloader:
             else:
                 downloaded = self._download_binary(doc_url)
             if doc_type == "COO":
-                downloaded = self._rename_coo_with_country(downloaded, self._current.code)
+                country = self._extract_country_from_file(downloaded, self._current.code)
+                self._current.country_of_origin = country
+                downloaded = self._rename_coo_with_country(downloaded, self._current.code, country)
 
             result.success = True
             result.file_path = str(downloaded)
@@ -538,6 +542,32 @@ class EDQMDownloader:
 
         return ""
 
+    def get_country_of_origin(self, product_code: str) -> str:
+        """Return the country of origin parsed from the EDQM "Origin of Goods" document.
+
+        The COO document is fetched into a scratch folder and discarded; the parsed
+        country is cached on the current product so repeated calls are free.
+        """
+        if not (self._ensure_current_product(product_code) and self._current):
+            return ""
+        if self._current.country_of_origin is not None:
+            return self._current.country_of_origin
+
+        coo_url = self._current.links.get("COO", "")
+        country = ""
+        if coo_url:
+            probe_dir = self.download_dir / "edqm" / f"_coo_probe_{self._safe_filename(self._current.code)}"
+            probe_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                path = self._download_binary(coo_url, destination_dir=probe_dir)
+                country = self._extract_country_from_file(path, self._current.code)
+            except Exception as exc:
+                logger.warning("Could not read EDQM COO for %s: %s", self._current.code, exc)
+            finally:
+                shutil.rmtree(probe_dir, ignore_errors=True)
+        self._current.country_of_origin = country
+        return country
+
     def get_detail_url(self, product_code: str) -> str:
         if self._ensure_current_product(product_code) and self._current:
             return self._current.detail_url or ""
@@ -707,7 +737,7 @@ class EDQMDownloader:
 
         return pdf_links[0][0]
 
-    def _download_binary(self, url: str) -> Path:
+    def _download_binary(self, url: str, destination_dir: Path | None = None) -> Path:
         session = self._require_session()
         try:
             resp = session.get(url, timeout=DOWNLOAD_REQUEST_TIMEOUT)
@@ -720,7 +750,7 @@ class EDQMDownloader:
             raise RuntimeError(f"Document URL returned HTML instead of file: {url}")
 
         filename = self._filename_from_response(resp, url)
-        destination = self.download_dir / "edqm" / filename
+        destination = (destination_dir or self.download_dir / "edqm") / filename
         destination.write_bytes(resp.content)
         return destination
 
@@ -756,9 +786,11 @@ class EDQMDownloader:
         name = re.sub(r'[\\/*?:"<>|]', "_", name)
         return name or "download.bin"
 
-    def _rename_coo_with_country(self, source_path: Path, product_code: str) -> Path:
+    def _rename_coo_with_country(self, source_path: Path, product_code: str, country: str | None = None) -> Path:
         """Rename downloaded COO file to country-based filename while keeping original extension."""
-        country = self._extract_country_from_file(source_path, product_code) or "Unknown Country"
+        if country is None:
+            country = self._extract_country_from_file(source_path, product_code)
+        country = country or "Unknown Country"
         suffix = source_path.suffix.lower() or ".pdf"
         filename = f"{self._safe_filename(country)}{suffix}"
         destination = source_path.with_name(filename)
